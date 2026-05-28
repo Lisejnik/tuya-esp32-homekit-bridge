@@ -131,10 +131,12 @@ Common route:
 
 1. Open [Tuya IoT Platform](https://iot.tuya.com/).
 2. Create a Tuya IoT account if you do not already have one.
-3. Create a Tuya IoT cloud project.
+3. Create a Tuya IoT cloud project if you do not already have one.
 4. Link your Smart Life / Tuya app account.
 5. Add the device to the project.
 6. Use TinyTuya wizard or Tuya IoT Platform API Explorer to retrieve `local_key`.
+
+You need both a Tuya IoT account and a cloud project. The Smart Life mobile-app account alone is not enough to access the API Explorer.
 
 TinyTuya wizard:
 
