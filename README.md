@@ -16,12 +16,13 @@ In plain language: the ESP32 behaves like a small translator. Apple Home talks t
 
 This is an experimental local bridge for existing Tuya Wi-Fi plugs. The ESP32 joins your Wi-Fi network, talks directly to the Tuya plug over the LAN, and exposes a HomeKit `Outlet` accessory via HomeSpan.
 
-The proven test device was:
+The proven test setup was:
 
 - [Tesla Smart Plug](https://www.alza.cz/tesla-smart-plug-d6775568.htm)
 - Tuya / Smart Life Wi-Fi plug
 - Tuya protocol `3.4`
 - relay datapoint `1`
+- [ESP32 development board](https://dratek.cz/arduino-platforma/1581-esp-32s-esp32-esp8266-development-board-2.4ghz-dual-mode-wifi-bluetooth-antenna-module.html)
 
 Other Tuya devices may work, but they must be verified first. Do not assume protocol version, datapoints, or local-key behavior.
 
@@ -359,6 +360,22 @@ If the ESP32 was paired before, clear HomeSpan pairing data using the HomeSpan S
 - [HomeSpan](https://github.com/HomeSpan/HomeSpan)
 - [HomeSpan Reference](https://github.com/HomeSpan/HomeSpan/blob/master/docs/Reference.md)
 - [HomeSpan User Guide](https://github.com/HomeSpan/HomeSpan/blob/master/docs/UserGuide.md)
+
+## Contact
+
+For questions, bug reports, or compatible-device reports, open a GitHub issue:
+
+[github.com/Lisejnik/tuya-esp32-homekit-bridge/issues](https://github.com/Lisejnik/tuya-esp32-homekit-bridge/issues)
+
+When opening an issue, include:
+
+- device model
+- Tuya protocol version
+- relay datapoint if known
+- ESP32 board type
+- sanitized Serial Monitor logs
+
+Do not include `local_key`, Wi-Fi passwords, Tuya Access Secret, generated `curl` commands, or unredacted API Explorer responses.
 
 ## Publishing Your Fork
 
