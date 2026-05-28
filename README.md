@@ -125,13 +125,36 @@ Common route:
 1. Create a Tuya IoT cloud project.
 2. Link your Smart Life / Tuya app account.
 3. Add the device to the project.
-4. Use TinyTuya wizard or Tuya IoT Platform API to retrieve `local_key`.
+4. Use TinyTuya wizard or Tuya IoT Platform API Explorer to retrieve `local_key`.
 
 TinyTuya wizard:
 
 ```bash
 python -m tinytuya wizard
 ```
+
+Tuya IoT Platform API Explorer:
+
+1. Open the Tuya IoT Platform.
+2. Open your cloud project.
+3. Select the correct data center, for example `Central Europe Data Center`.
+4. Go to `API Explorer`.
+5. Select `IoT Core`.
+6. Open `Device Management`.
+7. Choose `Query Device Details`.
+8. Enter the device ID found by TinyTuya scan.
+9. Click `Submit Request`.
+10. In the JSON response, copy the `result.local_key` value into your local `.env`.
+
+The API Explorer page can also show a generated `curl` command. Treat both the `curl` command and the JSON response as secrets because they may contain:
+
+- `local_key`
+- `client_id`
+- request signature
+- access token
+- location and device metadata
+
+Do not paste the API Explorer response, request URL, or generated `curl` command into issues, README files, screenshots, or commits unless all secrets are redacted.
 
 Tuya sometimes requires an active IoT Core / Cloud Development plan to retrieve device details. The cloud is used only to get `local_key`; switching is local after that.
 
