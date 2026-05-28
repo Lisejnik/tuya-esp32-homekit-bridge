@@ -1,0 +1,30 @@
+.venv/
+.env
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+
+# TinyTuya files can contain device IDs, local keys, cloud credentials, or snapshots.
+devices.json
+snapshot.json
+tinytuya.json
+tuya-raw.json
+tuya.json
+*.snapshot.json
+*.tuya-raw.json
+*.tinytuya.json
+*.devices.json
+
+# Local ESP32 credentials generated from .env.
+esp32/**/secrets.h
+esp32/**/.pio/
+esp32/**/build/
+esp32/**/.vscode/
+esp32/**/compile_commands.json
