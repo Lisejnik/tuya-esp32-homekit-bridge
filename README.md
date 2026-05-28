@@ -18,7 +18,7 @@ This is an experimental local bridge for existing Tuya Wi-Fi plugs. The ESP32 jo
 
 The proven test device was:
 
-- Tesla Smart Plug
+- [Tesla Smart Plug](https://www.alza.cz/tesla-smart-plug-d6775568.htm)
 - Tuya / Smart Life Wi-Fi plug
 - Tuya protocol `3.4`
 - relay datapoint `1`
