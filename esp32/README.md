@@ -18,7 +18,7 @@ This POC exposes only a Serial Monitor interface:
 - `on`
 - `off`
 
-HomeSpan is intentionally not included yet. HomeKit should be added only after ESP32 local Tuya control is proven stable.
+HomeSpan is intentionally not included in the POC. Use it first to prove local Tuya control before flashing the HomeKit sketch.
 
 The HomeSpan Outlet sketch is in:
 
@@ -28,7 +28,7 @@ esp32/homespan_tuya_outlet/
 
 It exposes the plug as a HomeKit `Outlet` and maps HomeKit `On` to Tuya DPS `1`.
 
-Planned direction after the first HomeSpan test:
+Checklist after the first HomeSpan test:
 
 - confirm pairing and control from Apple Home,
 - confirm state sync when the plug is changed outside HomeKit,

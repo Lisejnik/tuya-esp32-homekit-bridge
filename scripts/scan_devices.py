@@ -130,7 +130,7 @@ def main() -> int:
         print("No Tuya devices were found on the LAN.")
         print(
             "Close the Smart Life/Tuya app, verify the plug is powered on at "
-            f"{TARGET_IP}, and ensure UDP 6666/6667/7000 plus TCP 6668 are not blocked."
+            f"{args.target_ip}, and ensure UDP 6666/6667/7000 plus TCP 6668 are not blocked."
         )
         return 1
 

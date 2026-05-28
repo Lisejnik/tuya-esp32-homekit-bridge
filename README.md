@@ -10,6 +10,8 @@ This project uses:
 
 The original Tuya / Smart Life firmware stays on the plug.
 
+In plain language: the ESP32 behaves like a small translator. Apple Home talks to the ESP32 using HomeKit, and the ESP32 talks to the Tuya plug using the plug's local Tuya protocol.
+
 ## What This Is
 
 This is an experimental local bridge for existing Tuya Wi-Fi plugs. The ESP32 joins your Wi-Fi network, talks directly to the Tuya plug over the LAN, and exposes a HomeKit `Outlet` accessory via HomeSpan.
@@ -42,6 +44,8 @@ Optional but strongly recommended:
 
 - DHCP reservation for the Tuya plug
 - DHCP reservation for the ESP32
+
+DHCP reservation means telling your router to always give the same IP address to the same device. This prevents the bridge from breaking when the router changes the plug's IP address.
 
 ## Project Structure
 
@@ -99,12 +103,12 @@ python -m pip install -r requirements.txt
 
 ### Scan LAN for Tuya Devices
 
-Edit `scripts/scan_devices.py` if you want to change the highlighted target IP.
+If you already know the plug IP, pass it as `--target-ip`.
 
-Then run:
+Run:
 
 ```bash
-python scripts/scan_devices.py
+python scripts/scan_devices.py --target-ip 192.168.1.123
 ```
 
 Look for:
@@ -119,6 +123,8 @@ Confirm the IP address in your router/DHCP lease table. TinyTuya may not always 
 ### Get local_key
 
 You need the plug's `local_key`.
+
+This is a 16-character device secret used by the local Tuya protocol. Without it, the ESP32 cannot decrypt or send local commands.
 
 Common route:
 
@@ -235,6 +241,8 @@ off
 
 Only continue when this works reliably.
 
+This step deliberately avoids HomeKit. It proves that the ESP32 can control the plug locally before adding another layer.
+
 ## Phase 3: HomeKit Outlet with HomeSpan
 
 Use:
@@ -268,7 +276,7 @@ Fill:
 #define HOMEKIT_ACCESSORY_NAME "Tuya HomeKit Outlet"
 ```
 
-Flash the sketch, then add the ESP32 as a new accessory in Apple Home.
+Flash the sketch, then set the HomeKit pairing code before adding the ESP32 in Apple Home.
 
 ### Set HomeKit Pairing Code
 
