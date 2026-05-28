@@ -129,10 +129,12 @@ This is a 16-character device secret used by the local Tuya protocol. Without it
 
 Common route:
 
-1. Create a Tuya IoT cloud project.
-2. Link your Smart Life / Tuya app account.
-3. Add the device to the project.
-4. Use TinyTuya wizard or Tuya IoT Platform API Explorer to retrieve `local_key`.
+1. Open [Tuya IoT Platform](https://iot.tuya.com/).
+2. Create a Tuya IoT account if you do not already have one.
+3. Create a Tuya IoT cloud project.
+4. Link your Smart Life / Tuya app account.
+5. Add the device to the project.
+6. Use TinyTuya wizard or Tuya IoT Platform API Explorer to retrieve `local_key`.
 
 TinyTuya wizard:
 
@@ -142,7 +144,7 @@ python -m tinytuya wizard
 
 Tuya IoT Platform API Explorer:
 
-1. Open the Tuya IoT Platform.
+1. Open [Tuya IoT Platform](https://iot.tuya.com/).
 2. Open your cloud project.
 3. Select the correct data center, for example `Central Europe Data Center`.
 4. Go to `API Explorer`.
