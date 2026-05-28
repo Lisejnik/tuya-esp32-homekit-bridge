@@ -632,7 +632,6 @@ void setup() {
   }
 
   homeSpan.setWifiCredentials(WIFI_SSID, WIFI_PASSWORD);
-  homeSpan.setPairingCode(HOMEKIT_PAIRING_CODE);
   homeSpan.setLogLevel(1);
   homeSpan.begin(Category::Outlets, HOMEKIT_ACCESSORY_NAME);
 

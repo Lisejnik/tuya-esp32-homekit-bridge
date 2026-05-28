@@ -39,11 +39,10 @@ Fill:
 ```cpp
 #define WIFI_SSID "..."
 #define WIFI_PASSWORD "..."
-#define HOMEKIT_PAIRING_CODE "11122333"
 #define HOMEKIT_ACCESSORY_NAME "Tuya HomeKit Outlet"
 ```
 
-You can change the pairing code before flashing. Do not commit `secrets.h`.
+Do not commit `secrets.h`.
 
 ## Arduino IDE Setup
 
@@ -58,7 +57,19 @@ Open:
 esp32/homespan_tuya_outlet/homespan_tuya_outlet.ino
 ```
 
-Flash the ESP32, open Serial Monitor at `115200`, then pair it in Apple Home as a new accessory.
+Flash the ESP32 and open Serial Monitor at `115200`.
+
+Before pairing, set your own HomeKit pairing code through the HomeSpan Serial CLI:
+
+```text
+S 11223344
+```
+
+The code must be exactly 8 digits. Type it without hyphens in Serial Monitor and write it down. In Apple Home, enter the same code in HomeKit format, for example `112-23-344` for `S 11223344`.
+
+Use your own code, not the example above.
+
+Then pair it in Apple Home as a new accessory.
 
 If pairing data from an older HomeSpan sketch is already stored on the ESP32, use the HomeSpan Serial CLI to clear pairing data before pairing again.
 

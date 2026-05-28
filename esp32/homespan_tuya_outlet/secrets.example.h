@@ -5,7 +5,6 @@
 #define WIFI_SSID "CHANGE_ME"
 #define WIFI_PASSWORD "CHANGE_ME"
 
-#define HOMEKIT_PAIRING_CODE "11122333"
 #define HOMEKIT_ACCESSORY_NAME "Tuya HomeKit Outlet"
 #define HOMEKIT_MANUFACTURER "Tuya Local Bridge"
 #define HOMEKIT_MODEL "Tuya Plug via ESP32"

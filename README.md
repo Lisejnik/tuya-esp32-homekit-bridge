@@ -265,16 +265,35 @@ Fill:
 ```cpp
 #define WIFI_SSID "..."
 #define WIFI_PASSWORD "..."
-#define HOMEKIT_PAIRING_CODE "11122333"
+#define HOMEKIT_ACCESSORY_NAME "Tuya HomeKit Outlet"
 ```
 
 Flash the sketch, then add the ESP32 as a new accessory in Apple Home.
 
-Default pairing code:
+### Set HomeKit Pairing Code
+
+For security, do not hardcode the HomeKit pairing code in the sketch.
+
+After flashing, open Serial Monitor at `115200` and use the HomeSpan CLI command:
 
 ```text
-111-22-333
+S 11223344
 ```
+
+Rules:
+
+- the code must be exactly 8 digits
+- type it without hyphens in Serial Monitor
+- write it down before pairing
+- use your own code, not `11223344`
+
+When Apple Home asks for the setup code, enter it in the usual HomeKit format. For example:
+
+```text
+112-23-344
+```
+
+for the Serial command `S 11223344`.
 
 ## How It Maps to HomeKit
 
@@ -331,6 +350,7 @@ If the ESP32 was paired before, clear HomeSpan pairing data using the HomeSpan S
 - [TinyTuya](https://github.com/jasonacox/tinytuya)
 - [HomeSpan](https://github.com/HomeSpan/HomeSpan)
 - [HomeSpan Reference](https://github.com/HomeSpan/HomeSpan/blob/master/docs/Reference.md)
+- [HomeSpan User Guide](https://github.com/HomeSpan/HomeSpan/blob/master/docs/UserGuide.md)
 
 ## Publishing Your Fork
 

@@ -62,17 +62,15 @@ def read_define(path: Path, name: str, default: str) -> str:
 def render_content(path: Path, device_id: str, device_ip: str, local_key: str) -> str:
     wifi_ssid = read_define(path, "WIFI_SSID", "CHANGE_ME")
     wifi_password = read_define(path, "WIFI_PASSWORD", "CHANGE_ME")
-    pairing_code = read_define(path, "HOMEKIT_PAIRING_CODE", "11122333")
     accessory_name = read_define(path, "HOMEKIT_ACCESSORY_NAME", "Tuya HomeKit Outlet")
     manufacturer = read_define(path, "HOMEKIT_MANUFACTURER", "Tuya Local Bridge")
     model = read_define(path, "HOMEKIT_MODEL", "Tuya Plug via ESP32")
     return (
         "#pragma once\n\n"
         "// This file is generated from .env and is ignored by git.\n"
-        "// Existing Wi-Fi credentials and HomeKit pairing code are preserved.\n"
+        "// Existing Wi-Fi credentials and accessory metadata are preserved.\n"
         f'#define WIFI_SSID "{c_string(wifi_ssid)}"\n'
         f'#define WIFI_PASSWORD "{c_string(wifi_password)}"\n\n'
-        f'#define HOMEKIT_PAIRING_CODE "{c_string(pairing_code)}"\n\n'
         f'#define HOMEKIT_ACCESSORY_NAME "{c_string(accessory_name)}"\n'
         f'#define HOMEKIT_MANUFACTURER "{c_string(manufacturer)}"\n'
         f'#define HOMEKIT_MODEL "{c_string(model)}"\n\n'
