@@ -2,6 +2,8 @@
 
 This guide is for people who can follow careful steps but are not yet comfortable with Python, ESP32 flashing, Tuya local keys, or HomeKit development.
 
+![HomeKit controlled plug and lamp demo](images/homekit-plug-lamp-demo.png)
+
 Do not skip Phase 1. The Python test proves whether your Tuya plug can be controlled locally. If Phase 1 fails, the ESP32 and HomeKit steps will also fail.
 
 ## What You Are Building
@@ -13,6 +15,8 @@ The ESP32 becomes a small bridge:
 ```text
 Apple Home app -> ESP32 HomeKit accessory -> Tuya plug over local Wi-Fi
 ```
+
+![HomeKit bridge icon](images/homekit-bridge-icon.png)
 
 The Tuya cloud is only used once to get the plug's `local_key`. After that, on/off control is local on your LAN.
 

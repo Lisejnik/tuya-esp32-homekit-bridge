@@ -2,6 +2,8 @@
 
 Turn a Tuya / Smart Life Wi-Fi plug into a local Apple HomeKit Outlet without reflashing or opening the plug.
 
+![Tuya ESP32 HomeKit Bridge concept](docs/images/tuya-esp32-homekit-bridge-hero.png)
+
 This project uses:
 
 - Python + TinyTuya to discover and verify local Tuya control first
@@ -36,6 +38,12 @@ Release candidate for `v0.1.0`:
 - HomeSpan sketch exposes the plug as an Apple HomeKit `Outlet`
 
 This is still experimental. Treat the first release as a working reference build for one known device, not as a universal Tuya bridge.
+
+## Visual Overview
+
+![Local smart home control diagram](docs/images/local-smart-home-diagram.png)
+
+The intended flow is local: HomeKit talks to the ESP32, and the ESP32 talks to the Tuya plug on your Wi-Fi network.
 
 ## What This Is
 
