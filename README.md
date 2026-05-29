@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/homekit-bridge-icon.png" alt="Tuya ESP32 HomeKit Bridge logo" width="160">
+</p>
+
 # Tuya ESP32 HomeKit Bridge
 
 Turn a Tuya / Smart Life Wi-Fi plug into a local Apple HomeKit Outlet without reflashing or opening the plug.
