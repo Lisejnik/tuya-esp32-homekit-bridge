@@ -12,6 +12,31 @@ The original Tuya / Smart Life firmware stays on the plug.
 
 In plain language: the ESP32 behaves like a small translator. Apple Home talks to the ESP32 using HomeKit, and the ESP32 talks to the Tuya plug using the plug's local Tuya protocol.
 
+## Start Here
+
+If you already know Python, Arduino IDE, ESP32 flashing, and HomeKit pairing, follow the phases in this README.
+
+If you are new to those tools, use the beginner walkthrough first:
+
+[Beginner Guide](docs/beginner-guide.md)
+
+The beginner guide explains each step in smaller pieces, including what to install, what values to copy, what should happen after every step, and when to stop instead of guessing.
+
+For maintainers preparing a GitHub release, use:
+
+[Release Checklist](docs/release-checklist.md)
+
+## Current Status
+
+Release candidate for `v0.1.0`:
+
+- tested with one Tesla Smart Plug / Tuya protocol `3.4`
+- local Python control works through TinyTuya
+- ESP32 local Tuya POC works for `status`, `on`, and `off`
+- HomeSpan sketch exposes the plug as an Apple HomeKit `Outlet`
+
+This is still experimental. Treat the first release as a working reference build for one known device, not as a universal Tuya bridge.
+
 ## What This Is
 
 This is an experimental local bridge for existing Tuya Wi-Fi plugs. The ESP32 joins your Wi-Fi network, talks directly to the Tuya plug over the LAN, and exposes a HomeKit `Outlet` accessory via HomeSpan.
@@ -54,6 +79,9 @@ DHCP reservation means telling your router to always give the same IP address to
 .
 ├── .env.example
 ├── requirements.txt
+├── docs/
+│   ├── beginner-guide.md
+│   └── release-checklist.md
 ├── scripts/
 │   ├── scan_devices.py
 │   ├── test_plug.py

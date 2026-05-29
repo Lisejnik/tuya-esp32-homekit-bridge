@@ -11,9 +11,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-import tinytuya
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = PROJECT_ROOT / ".env"
@@ -31,6 +28,8 @@ def mask_secret(value: str) -> str:
 
 
 def load_config() -> dict[str, str]:
+    from dotenv import load_dotenv
+
     if not ENV_PATH.exists():
         raise ConfigError(
             f"Missing {ENV_PATH}. Create it from .env.example and fill values locally."
@@ -54,7 +53,9 @@ def load_config() -> dict[str, str]:
     return config
 
 
-def make_device(config: dict[str, str]) -> tinytuya.OutletDevice:
+def make_device(config: dict[str, str]) -> Any:
+    import tinytuya
+
     return tinytuya.OutletDevice(
         dev_id=config["DEVICE_ID"],
         address=config["DEVICE_IP"],

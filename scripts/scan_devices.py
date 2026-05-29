@@ -9,9 +9,6 @@ import os
 import sys
 from typing import Any
 
-from dotenv import load_dotenv
-import tinytuya
-
 
 DEFAULT_TARGET_IP = "192.168.1.123"
 SENSITIVE_KEYS = {
@@ -83,14 +80,11 @@ def print_device(device: dict[str, Any], target_ip: str) -> None:
 
 
 def main() -> int:
-    load_dotenv()
-    default_target_ip = os.getenv("DEVICE_IP", DEFAULT_TARGET_IP)
     parser = argparse.ArgumentParser(
         description="Scan LAN for Tuya devices and highlight the target plug IP."
     )
     parser.add_argument(
         "--target-ip",
-        default=default_target_ip,
         help=f"IP address to highlight. Default: DEVICE_IP from .env or {DEFAULT_TARGET_IP}.",
     )
     parser.add_argument(
@@ -101,8 +95,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    from dotenv import load_dotenv
+    import tinytuya
+
+    load_dotenv()
+    target_ip = args.target_ip or os.getenv("DEVICE_IP", DEFAULT_TARGET_IP)
+
     print("Scanning local network for Tuya devices...")
-    print("Target plug IP:", args.target_ip)
+    print("Target plug IP:", target_ip)
     print("No local keys will be printed by this script.")
 
     try:
@@ -130,19 +130,19 @@ def main() -> int:
         print("No Tuya devices were found on the LAN.")
         print(
             "Close the Smart Life/Tuya app, verify the plug is powered on at "
-            f"{args.target_ip}, and ensure UDP 6666/6667/7000 plus TCP 6668 are not blocked."
+            f"{target_ip}, and ensure UDP 6666/6667/7000 plus TCP 6668 are not blocked."
         )
         return 1
 
     print(f"\nFound {len(devices)} Tuya device(s):")
     found_target = False
     for device in devices:
-        if pick(device, "ip", "ip_address", "address", "gwId") == args.target_ip:
+        if pick(device, "ip", "ip_address", "address", "gwId") == target_ip:
             found_target = True
-        print_device(device, args.target_ip)
+        print_device(device, target_ip)
 
     if not found_target:
-        print(f"\nNo scanned Tuya device matched target IP {args.target_ip}.")
+        print(f"\nNo scanned Tuya device matched target IP {target_ip}.")
         print("Confirm the plug IP in your router/DHCP lease table and run the scan again.")
 
     return 0
