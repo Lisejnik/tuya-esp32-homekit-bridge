@@ -55,9 +55,18 @@ If Wi-Fi connection fails repeatedly during boot, the sketch falls back to setup
 - To edit settings, open the admin URL and save new values.
 - To clear only Wi-Fi and Tuya settings, use **Clear saved config** on the admin/setup page.
 - To clear HomeKit pairing, use **Clear HomeKit pairing** on the admin page and remove the accessory in Apple Home too.
+- To restart the ESP32, press **EN**.
 - To start fully from scratch, hold the ESP32 **BOOT / GPIO0** button for about 8 seconds while it is running. This clears bridge configuration, HomeKit pairing data, and the HomeKit device ID, then restarts into setup mode.
 
 Holding BOOT while the ESP32 starts still forces setup mode by clearing bridge configuration. On some dev boards, holding BOOT before reset enters the bootloader; if that happens, release BOOT and reset again.
+
+## Status LED
+
+- Setup mode: fast blink.
+- Wi-Fi connected successfully: 10 slow blinks, then off.
+- Normal running: off.
+
+The default status LED pin is `GPIO2`, which matches many ESP32 Dev Module boards. If your board uses another LED pin, change `STATUS_LED_PIN` in the sketch.
 
 ## Arduino IDE Setup
 

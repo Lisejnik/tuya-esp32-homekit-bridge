@@ -19,10 +19,17 @@ constexpr char SETUP_AP_SSID[] = "TuyaHomeKit-Setup";
 constexpr char SETUP_AP_PASSWORD_PREFIX[] = "THK";
 constexpr char PREF_NAMESPACE[] = "tuya-hk";
 constexpr uint8_t RESET_CONFIG_PIN = 0;
+constexpr uint8_t STATUS_LED_PIN = 2;
+constexpr uint8_t STATUS_LED_ON = HIGH;
+constexpr uint8_t STATUS_LED_OFF = LOW;
 constexpr uint8_t WIFI_CONNECT_ATTEMPTS = 3;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t SETUP_WIFI_RETRY_INTERVAL_MS = 60000;
 constexpr uint32_t FACTORY_RESET_HOLD_MS = 8000;
+constexpr uint32_t SETUP_LED_BLINK_MS = 120;
+constexpr uint8_t WIFI_CONNECTED_BLINKS = 10;
+constexpr uint32_t WIFI_CONNECTED_LED_ON_MS = 400;
+constexpr uint32_t WIFI_CONNECTED_LED_OFF_MS = 400;
 constexpr uint32_t PREFIX_55AA = 0x000055AA;
 constexpr uint32_t SUFFIX_55AA = 0x0000AA55;
 constexpr uint8_t CMD_SESS_KEY_NEG_START = 0x03;
@@ -78,10 +85,35 @@ bool homekit_started = false;
 bool setup_retry_saved_wifi = false;
 bool reset_button_was_pressed = false;
 bool factory_reset_started = false;
+bool setup_led_state = false;
 unsigned long last_setup_wifi_retry_ms = 0;
 unsigned long reset_button_pressed_ms = 0;
+unsigned long last_setup_led_toggle_ms = 0;
 
 String setup_ap_password;
+
+void setStatusLed(bool on) {
+  digitalWrite(STATUS_LED_PIN, on ? STATUS_LED_ON : STATUS_LED_OFF);
+}
+
+void updateSetupLed() {
+  if (millis() - last_setup_led_toggle_ms < SETUP_LED_BLINK_MS) {
+    return;
+  }
+  last_setup_led_toggle_ms = millis();
+  setup_led_state = !setup_led_state;
+  setStatusLed(setup_led_state);
+}
+
+void blinkWiFiConnectedLed() {
+  Serial.println("Wi-Fi connected; blinking status LED 10 times.");
+  for (uint8_t i = 0; i < WIFI_CONNECTED_BLINKS; i++) {
+    setStatusLed(true);
+    delay(WIFI_CONNECTED_LED_ON_MS);
+    setStatusLed(false);
+    delay(WIFI_CONNECTED_LED_OFF_MS);
+  }
+}
 
 void appendU32(std::vector<uint8_t>& out, uint32_t value) {
   out.push_back((value >> 24) & 0xFF);
@@ -1128,6 +1160,9 @@ void startSetupMode(const String& reason, bool retry_saved_wifi = false) {
   setup_mode = true;
   setup_retry_saved_wifi = retry_saved_wifi;
   last_setup_wifi_retry_ms = millis();
+  last_setup_led_toggle_ms = 0;
+  setup_led_state = false;
+  setStatusLed(false);
   WiFi.disconnect(true);
   WiFi.mode(WIFI_AP);
   setup_ap_password = setupPasswordFromRandom();
@@ -1416,6 +1451,8 @@ void setup() {
   Serial.println("ESP32 HomeSpan Tuya Outlet");
 
   pinMode(RESET_CONFIG_PIN, INPUT_PULLUP);
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  setStatusLed(false);
   if (digitalRead(RESET_CONFIG_PIN) == LOW) {
     clearConfig();
     startSetupMode("reset button held during boot");
@@ -1436,6 +1473,7 @@ void setup() {
     startSetupMode("Wi-Fi connection failed repeatedly", true);
     return;
   }
+  blinkWiFiConnectedLed();
 
   homeSpan.setWifiCredentials(config.wifi_ssid.c_str(),
                               config.wifi_password.c_str());
@@ -1474,6 +1512,7 @@ void loop() {
   if (setup_mode) {
     active_server = &setup_server;
     setup_server.handleClient();
+    updateSetupLed();
     maybeRetrySavedWiFiFromSetup();
     return;
   }

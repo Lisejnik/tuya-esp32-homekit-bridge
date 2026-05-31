@@ -359,9 +359,18 @@ Reset options:
 - **Edit settings:** open the admin URL and save new values.
 - **Clear saved config:** use the admin/setup page button. This removes Wi-Fi and Tuya settings, restarts, and opens setup mode. It does not clear HomeKit pairing.
 - **Clear HomeKit pairing:** use the admin page button, then remove the accessory in Apple Home too.
-- **Factory reset:** while the ESP32 is running, hold the BOOT / GPIO0 button for about 8 seconds. This clears bridge configuration, HomeKit pairing data, and the HomeKit device ID, then restarts into setup mode.
+- **Restart:** press `EN`. This is the ESP32 hardware reset button.
+- **Factory reset:** while the ESP32 is running, hold `BOOT / GPIO0` for about 8 seconds. This clears bridge configuration, HomeKit pairing data, and the HomeKit device ID, then restarts into setup mode.
 
 Holding GPIO0 / BOOT while the ESP32 starts still forces setup mode by clearing bridge configuration. On some dev boards, holding BOOT before reset enters the bootloader; if that happens, release BOOT and reset again.
+
+Status LED:
+
+- setup mode: fast blink
+- after Wi-Fi connects successfully: 10 slow blinks, then off
+- normal running: off
+
+The default status LED pin is `GPIO2`, which matches many ESP32 Dev Module boards. If your board uses another LED pin, change `STATUS_LED_PIN` in the sketch.
 
 The HomeSpan sketch no longer requires `esp32/homespan_tuya_outlet/secrets.h`. Secrets are stored in ESP32 flash memory through the setup wizard and must still never be committed or shared.
 
