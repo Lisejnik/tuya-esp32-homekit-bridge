@@ -22,6 +22,7 @@ constexpr uint16_t DNS_PORT = 53;
 constexpr char SETUP_AP_SSID[] = "TuyaHomeKit-Setup";
 constexpr char SETUP_AP_PASSWORD_PREFIX[] = "THK";
 constexpr char DEFAULT_HOSTNAME[] = "tuya-homekit";
+constexpr char FIRMWARE_VERSION[] = "2.3.0";
 constexpr char PREF_NAMESPACE[] = "tuya-hk";
 constexpr uint8_t RESET_CONFIG_PIN = 0;
 constexpr uint8_t STATUS_LED_PIN = 2;
@@ -34,7 +35,8 @@ constexpr uint8_t STATUS_LED_DIM_DUTY = 3;
 constexpr uint8_t WIFI_CONNECT_ATTEMPTS = 3;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t SETUP_WIFI_RETRY_INTERVAL_MS = 60000;
-constexpr uint32_t FACTORY_RESET_HOLD_MS = 8000;
+constexpr uint32_t SETUP_MODE_HOLD_MS = 5000;
+constexpr uint32_t FACTORY_RESET_HOLD_MS = 15000;
 constexpr uint32_t SETUP_LED_BLINK_MS = 120;
 constexpr uint8_t WIFI_CONNECTED_BLINKS = 10;
 constexpr uint32_t WIFI_CONNECTED_LED_ON_MS = 400;
@@ -52,6 +54,12 @@ constexpr uint32_t DEFAULT_POLL_INTERVAL_SECONDS = 30;
 constexpr size_t DIAGNOSTIC_LOG_SIZE = 16;
 constexpr uint8_t LAN_SCAN_MAX_RESULTS = 16;
 constexpr uint16_t LAN_SCAN_CONNECT_TIMEOUT_MS = 35;
+constexpr uint32_t HEALTH_LOW_HEAP_WARNING = 50000;
+constexpr uint32_t HEALTH_CRITICAL_HEAP = 25000;
+constexpr int HEALTH_WEAK_RSSI = -75;
+constexpr uint32_t HEALTH_HIGH_LATENCY_MS = 1500;
+constexpr uint32_t HEALTH_WARNING_FAILED_POLLS = 3;
+constexpr uint32_t HEALTH_ERROR_FAILED_POLLS = 5;
 
 const uint8_t LOCAL_NONCE[AES_BLOCK_SIZE] = {
     '0', '1', '2', '3', '4', '5', '6', '7',
@@ -114,6 +122,13 @@ struct RuntimeStatus {
   uint32_t successful_poll_count = 0;
 };
 
+struct HealthStatus {
+  String state = "Healthy";
+  String reason = "All systems responding.";
+  String suggested_fix = "No action needed.";
+  String updated_at;
+};
+
 BridgeConfig config;
 Preferences preferences;
 WebServer setup_server(80);
@@ -130,6 +145,7 @@ bool homekit_started = false;
 bool setup_retry_saved_wifi = false;
 bool reset_button_was_pressed = false;
 bool factory_reset_started = false;
+bool setup_mode_button_started = false;
 bool homekit_paired = false;
 bool tuya_error = false;
 bool setup_led_state = false;
@@ -141,6 +157,7 @@ uint8_t sos_step = 0;
 bool sos_led_on = false;
 bool captive_dns_started = false;
 bool mdns_started = false;
+bool mdns_failed = false;
 
 String setup_ap_password;
 RuntimeStatus runtime_status;
@@ -150,6 +167,7 @@ uint8_t diagnostic_log_count = 0;
 
 bool connectConfiguredWiFi(const BridgeConfig& candidate, bool keep_ap);
 String setupPage(const String& message);
+void startSetupMode(const String& reason, bool retry_saved_wifi = false);
 
 void addDiagnosticLog(const String& event) {
   const uint8_t index =
@@ -449,12 +467,89 @@ String formatDuration(unsigned long seconds) {
   return out;
 }
 
+String currentTimestampText() {
+  time_t now = time(nullptr);
+  if (now > 1700000000) {
+    char buffer[32] = {0};
+    struct tm timeinfo;
+    gmtime_r(&now, &timeinfo);
+    strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+    return String(buffer);
+  }
+  return String("uptime ") + formatDuration(millis() / 1000);
+}
+
 void addMetricRow(String& page, const String& label, const String& value) {
   page += F("<tr><th>");
   page += htmlEscape(label);
   page += F("</th><td>");
   page += htmlEscape(value);
   page += F("</td></tr>");
+}
+
+String jsonEscape(const String& value) {
+  String escaped;
+  escaped.reserve(value.length() + 8);
+  for (size_t i = 0; i < value.length(); i++) {
+    const char ch = value.charAt(i);
+    switch (ch) {
+      case '"':
+        escaped += F("\\\"");
+        break;
+      case '\\':
+        escaped += F("\\\\");
+        break;
+      case '\n':
+        escaped += F("\\n");
+        break;
+      case '\r':
+        escaped += F("\\r");
+        break;
+      case '\t':
+        escaped += F("\\t");
+        break;
+      default:
+        escaped += ch;
+        break;
+    }
+  }
+  return escaped;
+}
+
+void addJsonString(String& json, const String& key, const String& value,
+                   bool& first) {
+  if (!first) {
+    json += F(",");
+  }
+  first = false;
+  json += F("\"");
+  json += jsonEscape(key);
+  json += F("\":\"");
+  json += jsonEscape(value);
+  json += F("\"");
+}
+
+void addJsonNumber(String& json, const String& key, uint32_t value,
+                   bool& first) {
+  if (!first) {
+    json += F(",");
+  }
+  first = false;
+  json += F("\"");
+  json += jsonEscape(key);
+  json += F("\":");
+  json += String(value);
+}
+
+void addJsonBool(String& json, const String& key, bool value, bool& first) {
+  if (!first) {
+    json += F(",");
+  }
+  first = false;
+  json += F("\"");
+  json += jsonEscape(key);
+  json += F("\":");
+  json += value ? F("true") : F("false");
 }
 
 bool parseTuyaIp(IPAddress& ip) {
@@ -594,6 +689,86 @@ bool isHostnameValid(const String& hostname) {
     }
   }
   return true;
+}
+
+int findJsonKey(const String& json, const String& key) {
+  return json.indexOf(String("\"") + key + "\"");
+}
+
+bool extractJsonString(const String& json, const String& key, String& out) {
+  const int key_pos = findJsonKey(json, key);
+  if (key_pos < 0) {
+    return false;
+  }
+  int colon = json.indexOf(':', key_pos);
+  if (colon < 0) {
+    return false;
+  }
+  int start = json.indexOf('"', colon + 1);
+  if (start < 0) {
+    return false;
+  }
+  String value;
+  bool escaped = false;
+  for (int i = start + 1; i < json.length(); i++) {
+    const char ch = json.charAt(i);
+    if (escaped) {
+      switch (ch) {
+        case 'n':
+          value += '\n';
+          break;
+        case 'r':
+          value += '\r';
+          break;
+        case 't':
+          value += '\t';
+          break;
+        default:
+          value += ch;
+          break;
+      }
+      escaped = false;
+      continue;
+    }
+    if (ch == '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch == '"') {
+      out = value;
+      return true;
+    }
+    value += ch;
+  }
+  return false;
+}
+
+bool extractJsonUInt(const String& json, const String& key, uint32_t& out) {
+  const int key_pos = findJsonKey(json, key);
+  if (key_pos < 0) {
+    return false;
+  }
+  int colon = json.indexOf(':', key_pos);
+  if (colon < 0) {
+    return false;
+  }
+  int start = colon + 1;
+  while (start < json.length() && isSpace(json.charAt(start))) {
+    start++;
+  }
+  int end = start;
+  while (end < json.length() && isDigit(json.charAt(end))) {
+    end++;
+  }
+  if (end == start) {
+    return false;
+  }
+  out = uint32_t(json.substring(start, end).toInt());
+  return true;
+}
+
+bool jsonHasKey(const String& json, const String& key) {
+  return findJsonKey(json, key) >= 0;
 }
 
 String setupPasswordFromRandom() {
@@ -1533,12 +1708,14 @@ bool startMdnsResponder() {
     Serial.print("mDNS failed for hostname: ");
     Serial.println(config.device_hostname);
     addDiagnosticLog("mDNS failed: " + config.device_hostname);
+    mdns_failed = true;
     return false;
   }
   MDNS.addService("http", "tcp", ADMIN_PORT);
   MDNS.addServiceTxt("http", "tcp", "path", "/");
   MDNS.addServiceTxt("http", "tcp", "name", config.homekit_accessory_name);
   mdns_started = true;
+  mdns_failed = false;
   Serial.print("mDNS URL: ");
   Serial.println(localDashboardUrl());
   addDiagnosticLog("mDNS started: " + localDashboardUrl());
@@ -1559,6 +1736,179 @@ String webManifestJson() {
   json += F("\"icons\":[{\"src\":\"/icon.svg\",\"sizes\":\"any\",\"type\":\"image/svg+xml\",\"purpose\":\"any maskable\"}],");
   json += F("\"shortcuts\":[{\"name\":\"Dashboard\",\"url\":\"/\",\"description\":\"Open local dashboard\"}]}");
   return json;
+}
+
+String exportConfigJson(bool include_sensitive) {
+  String json;
+  json.reserve(include_sensitive ? 1100 : 850);
+  bool first = true;
+  json += F("{");
+  addJsonString(json, "firmware_version", FIRMWARE_VERSION, first);
+  addJsonString(json, "hostname", config.device_hostname, first);
+  addJsonString(json, "homekit_accessory_name",
+                config.homekit_accessory_name, first);
+  addJsonString(json, "homekit_device_type", config.homekit_service_type,
+                first);
+  addJsonString(json, "tuya_ip", config.tuya_ip, first);
+  addJsonString(json, "tuya_device_id", config.tuya_device_id, first);
+  addJsonString(json, "tuya_protocol_version",
+                config.tuya_protocol_version, first);
+  addJsonString(json, "relay_dps", config.tuya_relay_dps, first);
+  addJsonNumber(json, "polling_interval", config.poll_interval_seconds, first);
+  addJsonNumber(json, "dashboard_port", ADMIN_PORT, first);
+  addJsonBool(json, "mdns_enabled", mdns_started, first);
+  addJsonString(json, "exported_at", currentTimestampText(), first);
+  if (include_sensitive) {
+    addJsonString(json, "wifi_ssid", config.wifi_ssid, first);
+    addJsonString(json, "wifi_password", config.wifi_password, first);
+    addJsonString(json, "tuya_local_key", config.tuya_local_key, first);
+  }
+  json += F("}\n");
+  return json;
+}
+
+bool configFromJson(const String& json, BridgeConfig& candidate,
+                    String& warnings, String& error) {
+  candidate = config;
+  String value;
+  uint32_t number = 0;
+
+  if (extractJsonString(json, "hostname", value)) {
+    if (value.endsWith(".local")) {
+      error = "Hostname must not include .local.";
+      return false;
+    }
+    candidate.device_hostname = normalizedHostname(value);
+  }
+  if (extractJsonString(json, "homekit_accessory_name", value)) {
+    candidate.homekit_accessory_name = value;
+  }
+  if (extractJsonString(json, "homekit_device_type", value)) {
+    candidate.homekit_service_type = value;
+  }
+  if (extractJsonString(json, "tuya_ip", value)) {
+    candidate.tuya_ip = value;
+  }
+  if (extractJsonString(json, "tuya_device_id", value)) {
+    candidate.tuya_device_id = value;
+  }
+  if (extractJsonString(json, "tuya_protocol_version", value)) {
+    candidate.tuya_protocol_version = value;
+  }
+  if (extractJsonString(json, "relay_dps", value)) {
+    candidate.tuya_relay_dps = value;
+  }
+  if (extractJsonUInt(json, "polling_interval", number)) {
+    candidate.poll_interval_seconds = normalizedPollInterval(number);
+  }
+  if (extractJsonString(json, "wifi_ssid", value)) {
+    candidate.wifi_ssid = value;
+  }
+  if (extractJsonString(json, "wifi_password", value)) {
+    candidate.wifi_password = value;
+  } else if (candidate.wifi_password.isEmpty()) {
+    warnings += "Wi-Fi password is missing; enter it before applying if no saved password exists. ";
+  }
+  if (extractJsonString(json, "tuya_local_key", value)) {
+    candidate.tuya_local_key = value;
+  } else if (candidate.tuya_local_key.isEmpty()) {
+    warnings += "Tuya local key is missing; enter it before applying if no saved key exists. ";
+  }
+
+  if (jsonHasKey(json, "dashboard_port")) {
+    warnings += "dashboard_port is fixed by this firmware and will be ignored. ";
+  }
+  if (jsonHasKey(json, "mdns_enabled")) {
+    warnings += "mdns_enabled is managed by this firmware and will be ignored. ";
+  }
+  if (warnings.isEmpty()) {
+    warnings = "Unknown fields, if any, were ignored.";
+  }
+  return validateConfig(candidate, error);
+}
+
+String importPreviewHtml(const BridgeConfig& candidate, const String& warnings,
+                         bool has_secrets) {
+  String html;
+  html.reserve(4500);
+  html += F("<div class=\"result-card\"><h3>Import preview</h3><table>");
+  addMetricRow(html, "Hostname", candidate.device_hostname + ".local");
+  addMetricRow(html, "HomeKit accessory name",
+               candidate.homekit_accessory_name);
+  addMetricRow(html, "HomeKit type", candidate.homekit_service_type);
+  addMetricRow(html, "Tuya IP", candidate.tuya_ip);
+  addMetricRow(html, "Tuya device ID", candidate.tuya_device_id);
+  addMetricRow(html, "Tuya protocol version",
+               candidate.tuya_protocol_version);
+  addMetricRow(html, "Relay DPS", candidate.tuya_relay_dps);
+  addMetricRow(html, "Polling interval",
+               String(candidate.poll_interval_seconds) + " seconds");
+  addMetricRow(html, "Contains secrets", yesNo(has_secrets));
+  html += F("</table><p class=\"help\"><strong>Warnings:</strong> ");
+  html += htmlEscape(warnings);
+  html += F("</p><p class=\"help\">Review these values. Use Apply import only when they are correct.</p></div>");
+  return html;
+}
+
+HealthStatus currentHealthStatus() {
+  HealthStatus health;
+  health.updated_at = currentTimestampText();
+  if (WiFi.status() != WL_CONNECTED) {
+    health.state = "Error";
+    health.reason = "Wi-Fi disconnected.";
+    health.suggested_fix = "Check Wi-Fi or hold BOOT for 5s to enter Setup Mode.";
+    return health;
+  }
+  if (!homekit_started && !setup_mode) {
+    health.state = "Error";
+    health.reason = "HomeKit is not initialized.";
+    health.suggested_fix = "Restart the ESP32 or re-save configuration.";
+    return health;
+  }
+  if (ESP.getFreeHeap() < HEALTH_CRITICAL_HEAP) {
+    health.state = "Error";
+    health.reason = "Critical low memory.";
+    health.suggested_fix = "Restart the ESP32 and report the issue.";
+    return health;
+  }
+  if (runtime_status.failed_poll_count >= HEALTH_ERROR_FAILED_POLLS || tuya_error) {
+    health.state = "Error";
+    health.reason = "Tuya device unreachable.";
+    health.suggested_fix = "Check plug power, IP address, local key, and LAN.";
+    return health;
+  }
+  if (WiFi.RSSI() < HEALTH_WEAK_RSSI) {
+    health.state = "Warning";
+    health.reason = "Weak Wi-Fi signal.";
+    health.suggested_fix = "Move ESP32 closer to Wi-Fi or improve coverage.";
+    return health;
+  }
+  if (runtime_status.failed_poll_count >= HEALTH_WARNING_FAILED_POLLS) {
+    health.state = "Warning";
+    health.reason = String("Tuya device missed ") +
+                    runtime_status.failed_poll_count + " polls.";
+    health.suggested_fix = "Check plug reachability and consider increasing polling interval.";
+    return health;
+  }
+  if (runtime_status.last_latency_ms > HEALTH_HIGH_LATENCY_MS) {
+    health.state = "Warning";
+    health.reason = "Tuya response latency is high.";
+    health.suggested_fix = "Check Wi-Fi quality and plug responsiveness.";
+    return health;
+  }
+  if (mdns_failed) {
+    health.state = "Warning";
+    health.reason = "mDNS friendly URL failed to start.";
+    health.suggested_fix = "Use the fallback IP URL from Serial Monitor.";
+    return health;
+  }
+  if (ESP.getFreeHeap() < HEALTH_LOW_HEAP_WARNING) {
+    health.state = "Warning";
+    health.reason = "Free heap is low.";
+    health.suggested_fix = "Restart the ESP32 if behavior becomes unstable.";
+    return health;
+  }
+  return health;
 }
 
 void handleManifest() {
@@ -1593,6 +1943,7 @@ String setupPage(const String& message) {
   page += F("input,select{font:inherit;padding:10px;border:1px solid #d0d7de;border-radius:6px;background:white;min-width:0}button{font:inherit;border:0;border-radius:6px;padding:10px 14px;background:#008b8b;color:white;font-weight:700;cursor:pointer}");
   page += F("button.secondary{background:#24292f}button.danger{background:#b42318}button.small{padding:6px 9px;font-size:13px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}");
   page += F(".msg{margin:16px 0;padding:12px;border-radius:6px;background:#ddf4ff;border:1px solid #54aeef}.error{background:#ffebe9;border-color:#ff8182}.result-card{margin-top:14px;padding:12px;border:1px solid #d8dee4;border-radius:6px;background:#f6f8fa}");
+  page += F(".badge{display:inline-block;border-radius:999px;padding:4px 10px;font-weight:700}.Healthy{background:#dafbe1;color:#116329}.Warning{background:#fff8c5;color:#7d4e00}.Error{background:#ffebe9;color:#b42318}.simple .advanced-only{display:none}");
   page += F("table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;border-bottom:1px solid #d8dee4;padding:8px;vertical-align:top}th{width:34%;color:#57606a;font-weight:600}code{word-break:break-all}.log{max-height:220px;overflow:auto;background:#0d1117;color:#c9d1d9;border-radius:6px;padding:10px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}");
   page += F("@media(max-width:640px){body{padding:10px}.panel{padding:14px}h1{font-size:23px}th,td{display:block;width:auto}.steps{padding-bottom:4px}}");
   page += F("</style></head><body><main class=\"wrap\"><section class=\"panel\"><h1>");
@@ -1608,6 +1959,16 @@ String setupPage(const String& message) {
     page += F("</div>");
   }
   if (homekit_started) {
+    const HealthStatus health = currentHealthStatus();
+    page += F("<div class=\"result-card\"><h2>Health</h2><p><span class=\"badge ");
+    page += htmlEscape(health.state);
+    page += F("\">");
+    page += htmlEscape(health.state);
+    page += F("</span></p><table>");
+    addMetricRow(page, "Reason", health.reason);
+    addMetricRow(page, "Last update", health.updated_at);
+    addMetricRow(page, "Suggested fix", health.suggested_fix);
+    page += F("</table></div>");
     page += F("<div class=\"grid\"><div><h2>Device / HomeKit</h2><table>");
     addMetricRow(page, "Accessory name", config.homekit_accessory_name);
     addMetricRow(page, "HomeKit type", homeKitServiceLabel());
@@ -1665,6 +2026,7 @@ String setupPage(const String& message) {
   page += F("</section><section class=\"panel\"><h2>");
   page += homekit_started ? F("Edit configuration") : F("Setup wizard");
   page += F("</h2><form id=\"setup\" method=\"post\" action=\"/save\">");
+  page += F("<div class=\"actions\"><label><input type=\"radio\" name=\"wizard_mode\" value=\"simple\" checked> Simple</label><label><input type=\"radio\" name=\"wizard_mode\" value=\"advanced\"> Advanced</label></div>");
   page += F("<div class=\"steps\"><button type=\"button\" class=\"step-dot active\" data-step-button=\"0\">1 Wi-Fi</button><button type=\"button\" class=\"step-dot\" data-step-button=\"1\">2 Find Tuya</button><button type=\"button\" class=\"step-dot\" data-step-button=\"2\">3 Credentials</button><button type=\"button\" class=\"step-dot\" data-step-button=\"3\">4 Test</button><button type=\"button\" class=\"step-dot\" data-step-button=\"4\">5 HomeKit</button><button type=\"button\" class=\"step-dot\" data-step-button=\"5\">6 Save</button></div>");
 
   page += F("<div class=\"step active\" data-step=\"0\"><div class=\"grid\">");
@@ -1673,7 +2035,7 @@ String setupPage(const String& message) {
   page += F("\"><span class=\"help\">Name of your home, IoT, or guest Wi-Fi network.</span></label>");
   page += F("<label>Wi-Fi password<input name=\"wifi_password\" type=\"password\" value=\"");
   page += F("\" placeholder=\"Leave blank to keep saved password\"><span class=\"help\">Leave blank when editing if the saved Wi-Fi password should stay unchanged.</span></label>");
-  page += F("<label>Local dashboard hostname<input name=\"device_hostname\" required maxlength=\"32\" pattern=\"[a-zA-Z0-9-]{1,32}\" value=\"");
+  page += F("<label class=\"advanced-only\">Local dashboard hostname<input name=\"device_hostname\" required maxlength=\"32\" pattern=\"[a-zA-Z0-9-]{1,32}\" value=\"");
   page += htmlEscape(config.device_hostname);
   page += F("\"><span class=\"help\">Bookmark http://");
   page += htmlEscape(config.device_hostname);
@@ -1694,15 +2056,15 @@ String setupPage(const String& message) {
   page += F("\"><span class=\"help\">Device ID from Tuya / Smart Life developer data. This is not the IP address.</span></label>");
   page += F("<label>Tuya local key<input name=\"tuya_local_key\" maxlength=\"16\" value=\"");
   page += F("\" placeholder=\"Leave blank to keep saved key\"><span class=\"help\">16-character local key used by the ESP32 to talk directly to the plug. Leave blank when editing to keep the saved key.</span></label>");
-  page += F("<label>Tuya protocol version<input name=\"tuya_protocol_version\" required value=\"");
+  page += F("<label class=\"advanced-only\">Tuya protocol version<input name=\"tuya_protocol_version\" required value=\"");
   page += htmlEscape(config.tuya_protocol_version);
   page += F("\"><span class=\"help\">Keep 3.4 for the tested plug. Other versions are not supported by this first wizard.</span></label>");
-  page += F("<label>Relay DPS<input name=\"tuya_relay_dps\" required value=\"");
+  page += F("<label class=\"advanced-only\">Relay DPS<input name=\"tuya_relay_dps\" required value=\"");
   page += htmlEscape(config.tuya_relay_dps);
   page += F("\"><span class=\"help\">DPS means Tuya datapoint. It is the number Tuya uses for a value inside the plug. For the tested socket, relay on/off is DPS 1.</span></label>");
   page += F("</div></div>");
 
-  page += F("<div class=\"step\" data-step=\"3\"><p class=\"help\">Run Test Tuya connection first. If it succeeds, Scan DPS can show returned datapoints without toggling anything.</p><div class=\"actions\"><button class=\"secondary\" type=\"button\" id=\"test\">Test Tuya connection</button><button class=\"secondary\" type=\"button\" id=\"dps\">Scan DPS</button></div><div id=\"result\"></div></div>");
+  page += F("<div class=\"step\" data-step=\"3\"><p class=\"help\">Run Test Tuya connection first. If it succeeds, Advanced mode can scan returned DPS datapoints without toggling anything.</p><div class=\"actions\"><button class=\"secondary\" type=\"button\" id=\"test\">Test Tuya connection</button><button class=\"secondary advanced-only\" type=\"button\" id=\"dps\">Scan DPS</button></div><div id=\"result\"></div></div>");
 
   page += F("<div class=\"step\" data-step=\"4\"><div class=\"grid\">");
   page += F("<label>HomeKit accessory name<input name=\"homekit_accessory_name\" required value=\"");
@@ -1720,7 +2082,7 @@ String setupPage(const String& message) {
   page += F("</div><div class=\"result-card\"><h3>HomeKit pairing</h3><p class=\"help\">Apple Home asks for a HomeKit setup code when adding the accessory. The code is not your Wi-Fi password and it is not the temporary setup AP password. Use the code you entered above, or the HomeSpan default 466-37-726 if you never changed it.</p></div></div>");
 
   page += F("<div class=\"step\" data-step=\"5\"><div class=\"grid\">");
-  page += F("<label>Polling interval, seconds<input name=\"poll_interval_seconds\" type=\"number\" min=\"5\" max=\"3600\" value=\"");
+  page += F("<label class=\"advanced-only\">Polling interval, seconds<input name=\"poll_interval_seconds\" type=\"number\" min=\"5\" max=\"3600\" value=\"");
   page += String(config.poll_interval_seconds);
   page += F("\"><span class=\"help\">How often the ESP32 checks the plug state in the background. 30 seconds is a safe default.</span></label></div><p class=\"help\">Saving restarts the ESP32. After restart, use Apple Home to pair with the HomeKit code above.</p>");
   page += F("</div><div class=\"actions\">");
@@ -1730,7 +2092,7 @@ String setupPage(const String& message) {
   if (homekit_started) {
     page += F("<button class=\"danger\" type=\"button\" id=\"unpair\">Clear HomeKit pairing</button>");
   }
-  page += F("</div></form><p class=\"help\">Setup AP: ");
+  page += F("</div></form><div class=\"result-card\"><h3>Backup and restore</h3><p class=\"help\">Exports exclude Wi-Fi password and Tuya local key by default.</p><label><input type=\"checkbox\" id=\"includeSecrets\"> Include sensitive values</label><div class=\"actions\"><button class=\"secondary\" type=\"button\" id=\"exportCfg\">Export config</button></div><label class=\"advanced-only\">Import JSON config<textarea id=\"importJson\" name=\"import_json\" rows=\"8\" style=\"font:inherit;width:100%;box-sizing:border-box\"></textarea><span class=\"help\">Unknown fields are ignored. Values are validated before saving.</span></label><input class=\"advanced-only\" type=\"file\" id=\"importFile\" accept=\"application/json,.json\"><div class=\"actions advanced-only\"><button class=\"secondary\" type=\"button\" id=\"previewImport\">Preview import</button><button class=\"danger\" type=\"button\" id=\"applyImport\">Apply import and restart</button></div><div id=\"importResult\"></div></div><p class=\"help\">Setup AP: ");
   page += SETUP_AP_SSID;
   page += F(" · In setup mode open http://192.168.4.1/ if the captive portal does not appear automatically · In normal mode open ");
   page += htmlEscape(localDashboardUrl());
@@ -1739,6 +2101,7 @@ String setupPage(const String& message) {
   page += F(".</p></section>");
   page += F("<script>");
   page += F("const form=document.getElementById('setup');const steps=[...document.querySelectorAll('.step')];const dots=[...document.querySelectorAll('.step-dot')];let step=0;");
+  page += F("function setMode(mode){document.body.classList.toggle('simple',mode==='simple');}document.querySelectorAll('input[name=\"wizard_mode\"]').forEach(r=>r.onchange=()=>setMode(r.value));setMode('simple');");
   page += F("function showStep(n){step=Math.max(0,Math.min(steps.length-1,n));steps.forEach((el,i)=>el.classList.toggle('active',i===step));dots.forEach((el,i)=>el.classList.toggle('active',i===step));}");
   page += F("dots.forEach((b,i)=>b.onclick=()=>showStep(i));document.getElementById('next').onclick=()=>showStep(step+1);document.getElementById('prev').onclick=()=>showStep(step-1);");
   page += F("function target(id){return document.getElementById(id)||document.getElementById('dashboardResult')||document.getElementById('result');}");
@@ -1747,6 +2110,10 @@ String setupPage(const String& message) {
   page += F("const dt=document.getElementById('dashTest');if(dt)dt.onclick=()=>postHtml('/test','dashboardResult','Testing Tuya connection...');const dd=document.getElementById('dashDps');if(dd)dd.onclick=()=>postHtml('/dps','dashboardResult','Scanning DPS...');");
   page += F("window.useIp=ip=>{form.tuya_ip.value=ip;showStep(2)};window.useDps=dps=>{form.tuya_relay_dps.value=dps;showStep(2)};");
   page += F("async function postPlain(url,msg){const out=target('dashboardResult');out.innerHTML='<div class=\"result-card\">'+msg+'</div>';const r=await fetch(url,{method:'POST'});out.innerHTML='<div class=\"result-card\">'+await r.text()+'</div>';}");
+  page += F("document.getElementById('exportCfg').onclick=()=>{const s=document.getElementById('includeSecrets').checked;if(s&&!confirm('This file contains secrets. Anyone with this file may be able to access your Wi-Fi or control your Tuya device. Continue?'))return;location.href='/export?include_sensitive='+(s?'1':'0')};");
+  page += F("const file=document.getElementById('importFile');if(file)file.onchange=async()=>{const f=file.files[0];if(f)document.getElementById('importJson').value=await f.text()};");
+  page += F("function importData(){const fd=new FormData();fd.append('import_json',document.getElementById('importJson').value);return fd}document.getElementById('previewImport').onclick=async()=>{const out=document.getElementById('importResult');out.innerHTML='<div class=\"result-card\">Validating import...</div>';const r=await fetch('/import/preview',{method:'POST',body:importData()});out.innerHTML=await r.text()};");
+  page += F("document.getElementById('applyImport').onclick=async()=>{if(!confirm('Apply imported configuration and restart ESP32?'))return;const out=document.getElementById('importResult');out.innerHTML='<div class=\"result-card\">Applying import...</div>';const r=await fetch('/import/apply',{method:'POST',body:importData()});out.innerHTML='<div class=\"result-card\">'+await r.text()+'</div>'};");
   page += F("document.getElementById('reset').onclick=()=>{if(confirm('Clear saved configuration and restart setup mode?'))postPlain('/reset','Resetting...')};const rd=document.getElementById('resetDash');if(rd)rd.onclick=()=>{if(confirm('Clear saved configuration and restart setup mode?'))postPlain('/reset','Resetting...')};");
   page += F("const unpair=document.getElementById('unpair');if(unpair)unpair.onclick=()=>{if(confirm('Clear HomeKit pairing on the ESP32? Also remove this accessory in Apple Home.'))postPlain('/unpair','Clearing HomeKit pairing...')};const ud=document.getElementById('unpairDash');if(ud)ud.onclick=()=>{if(confirm('Clear HomeKit pairing on the ESP32? Also remove this accessory in Apple Home.'))postPlain('/unpair','Clearing HomeKit pairing...')};");
   page += F("const restart=document.getElementById('restart');if(restart)restart.onclick=()=>{if(confirm('Restart ESP32 now?'))postPlain('/restart','Restarting...')};");
@@ -1826,6 +2193,65 @@ void handleRestart() {
   ESP.restart();
 }
 
+void handleExportConfig() {
+  const bool include_sensitive = requestServer().arg("include_sensitive") == "1";
+  requestServer().sendHeader(
+      "Content-Disposition",
+      "attachment; filename=\"tuya-homekit-bridge-config.json\"");
+  requestServer().send(200, "application/json",
+                       exportConfigJson(include_sensitive));
+  addDiagnosticLog(include_sensitive ? "Config exported with secrets"
+                                     : "Config exported without secrets");
+}
+
+void handleImportPreview() {
+  const String json = requestServer().arg("import_json");
+  if (json.isEmpty()) {
+    requestServer().send(400, "text/html",
+                         F("<div class=\"result-card error\">Paste or upload a JSON config first.</div>"));
+    return;
+  }
+  BridgeConfig candidate;
+  String warnings;
+  String error;
+  if (!configFromJson(json, candidate, warnings, error)) {
+    requestServer().send(400, "text/html",
+                         String("<div class=\"result-card error\">Import validation failed: ") +
+                             htmlEscape(error) + "</div>");
+    return;
+  }
+  const bool has_secrets = jsonHasKey(json, "wifi_password") ||
+                           jsonHasKey(json, "tuya_local_key");
+  requestServer().send(200, "text/html",
+                       importPreviewHtml(candidate, warnings, has_secrets));
+}
+
+void handleImportApply() {
+  const String json = requestServer().arg("import_json");
+  if (json.isEmpty()) {
+    requestServer().send(400, "text/plain", "Paste or upload a JSON config first.");
+    return;
+  }
+  BridgeConfig candidate;
+  String warnings;
+  String error;
+  if (!configFromJson(json, candidate, warnings, error)) {
+    requestServer().send(400, "text/plain",
+                         String("Import validation failed: ") + error);
+    return;
+  }
+  if (!saveConfig(candidate, error)) {
+    requestServer().send(400, "text/plain",
+                         String("Import save failed: ") + error);
+    return;
+  }
+  addDiagnosticLog("Configuration imported from JSON");
+  requestServer().send(200, "text/plain",
+                       "Configuration imported. ESP32 is restarting...");
+  delay(1200);
+  ESP.restart();
+}
+
 void handleUnpairHomeKit() {
   if (!homekit_started) {
     requestServer().send(409, "text/plain",
@@ -1866,19 +2292,27 @@ void handleResetButton() {
   if (pressed && !reset_button_was_pressed) {
     reset_button_pressed_ms = millis();
     reset_button_was_pressed = true;
-    Serial.println("Reset button pressed. Hold for 8 seconds for factory reset.");
+    setup_mode_button_started = false;
+    Serial.println("BOOT button pressed. Hold 5s for Setup Mode or 15s for Factory Reset.");
   }
   if (!pressed) {
     if (reset_button_was_pressed && !factory_reset_started) {
-      Serial.println("Reset button released before factory reset.");
+      Serial.println("BOOT button released.");
     }
     reset_button_was_pressed = false;
+    setup_mode_button_started = false;
     reset_button_pressed_ms = 0;
     return;
   }
+  if (!setup_mode_button_started && !setup_mode &&
+      millis() - reset_button_pressed_ms >= SETUP_MODE_HOLD_MS) {
+    setup_mode_button_started = true;
+    Serial.println("BOOT held for 5 seconds: entering Setup Mode without erasing configuration.");
+    startSetupMode("BOOT/GPIO0 held for 5 seconds");
+  }
   if (!factory_reset_started &&
       millis() - reset_button_pressed_ms >= FACTORY_RESET_HOLD_MS) {
-    performFactoryReset("BOOT/GPIO0 held for 8 seconds");
+    performFactoryReset("BOOT/GPIO0 held for 15 seconds");
   }
 }
 
@@ -1993,7 +2427,7 @@ void handleDpsScan() {
   requestServer().send(200, "text/html", dpsInspectorHtml(payload_json));
 }
 
-void startSetupMode(const String& reason, bool retry_saved_wifi = false) {
+void startSetupMode(const String& reason, bool retry_saved_wifi) {
   setup_mode = true;
   setup_retry_saved_wifi = retry_saved_wifi;
   last_setup_wifi_retry_ms = millis();
@@ -2028,6 +2462,9 @@ void startSetupMode(const String& reason, bool retry_saved_wifi = false) {
   setup_server.on("/", HTTP_GET, handleSetupRoot);
   setup_server.on("/manifest.webmanifest", HTTP_GET, handleManifest);
   setup_server.on("/icon.svg", HTTP_GET, handleIcon);
+  setup_server.on("/export", HTTP_GET, handleExportConfig);
+  setup_server.on("/import/preview", HTTP_POST, handleImportPreview);
+  setup_server.on("/import/apply", HTTP_POST, handleImportApply);
   setup_server.on("/generate_204", HTTP_GET, handleCaptivePortalProbe);
   setup_server.on("/gen_204", HTTP_GET, handleCaptivePortalProbe);
   setup_server.on("/hotspot-detect.html", HTTP_GET, handleCaptivePortalProbe);
@@ -2050,6 +2487,9 @@ void startAdminServer() {
   admin_server.on("/", HTTP_GET, handleSetupRoot);
   admin_server.on("/manifest.webmanifest", HTTP_GET, handleManifest);
   admin_server.on("/icon.svg", HTTP_GET, handleIcon);
+  admin_server.on("/export", HTTP_GET, handleExportConfig);
+  admin_server.on("/import/preview", HTTP_POST, handleImportPreview);
+  admin_server.on("/import/apply", HTTP_POST, handleImportApply);
   admin_server.on("/save", HTTP_POST, handleSaveConfig);
   admin_server.on("/reset", HTTP_POST, handleResetConfig);
   admin_server.on("/test", HTTP_POST, handleTestConfig);
@@ -2084,6 +2524,38 @@ void maybeRetrySavedWiFiFromSetup() {
   Serial.println("Saved Wi-Fi is available again; restarting normal mode.");
   delay(500);
   ESP.restart();
+}
+
+bool handleBootButtonHold() {
+  if (digitalRead(RESET_CONFIG_PIN) != LOW) {
+    return false;
+  }
+  Serial.println("BOOT held during boot.");
+  Serial.println("Release after 5s for Setup Mode, keep holding 15s for Factory Reset.");
+  const unsigned long start = millis();
+  bool setup_threshold_logged = false;
+  while (digitalRead(RESET_CONFIG_PIN) == LOW) {
+    const unsigned long held_ms = millis() - start;
+    if (!setup_threshold_logged && held_ms >= SETUP_MODE_HOLD_MS) {
+      setup_threshold_logged = true;
+      Serial.println("5s reached: release now for Setup Mode, keep holding for Factory Reset.");
+    }
+    if (held_ms >= FACTORY_RESET_HOLD_MS) {
+      performFactoryReset("BOOT/GPIO0 held for 15 seconds during boot");
+      return true;
+    }
+    setStatusLed((held_ms / 250) % 2 == 0);
+    delay(50);
+  }
+  setStatusLed(false);
+  if (millis() - start >= SETUP_MODE_HOLD_MS) {
+    Serial.println("Entering Setup Mode without erasing saved configuration.");
+    loadConfig();
+    startSetupMode("BOOT/GPIO0 held for 5 seconds during boot");
+    return true;
+  }
+  Serial.println("BOOT released before 5 seconds; continuing normal boot.");
+  return false;
 }
 
 void syncTime() {
@@ -2313,9 +2785,7 @@ void setup() {
   pinMode(RESET_CONFIG_PIN, INPUT_PULLUP);
   ledcAttach(STATUS_LED_PIN, STATUS_LED_PWM_HZ, STATUS_LED_PWM_BITS);
   setStatusLed(false);
-  if (digitalRead(RESET_CONFIG_PIN) == LOW) {
-    clearConfig();
-    startSetupMode("reset button held during boot");
+  if (handleBootButtonHold()) {
     return;
   }
 
@@ -2360,7 +2830,7 @@ void setup() {
   new Characteristic::Manufacturer(config.homekit_manufacturer.c_str());
   new Characteristic::Model(config.homekit_model.c_str());
   new Characteristic::SerialNumber(config.tuya_device_id.c_str());
-  new Characteristic::FirmwareRevision("2.2.0");
+  new Characteristic::FirmwareRevision(FIRMWARE_VERSION);
   if (config.homekit_service_type == "light") {
     new HomeKitTuyaLight();
   } else if (config.homekit_service_type == "switch") {

@@ -7,6 +7,11 @@
 - Show the friendly dashboard management URL in the web UI and Serial Monitor.
 - Add PWA manifest and local SVG icon endpoints for adding the dashboard to a phone home screen.
 - Improve setup captive portal behavior with wildcard DNS and common OS captive-portal probe routes.
+- Add dashboard configuration export with secrets excluded by default.
+- Add JSON configuration import with validation and preview before applying.
+- Add 5s BOOT hold Setup Mode and 15s BOOT hold Factory Reset behavior.
+- Add dashboard health status with reason, update time, and suggested fix.
+- Add Simple and Advanced wizard modes.
 
 ## v2.1 - Smart Setup & Diagnostics
 

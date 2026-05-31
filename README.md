@@ -44,6 +44,7 @@ Current release: `v2.1 Smart Setup & Diagnostics`.
 - admin dashboard shows HomeKit, Tuya, network and diagnostics status after the ESP32 joins Wi-Fi
 - experimental LAN scan and read-only DPS inspector are available from the web UI
 - next development step adds friendly local access so users can open the dashboard at `http://tuya-homekit.local:8080/` instead of finding the ESP32 IP address
+- v2.3 development adds backup/restore, health status, Simple/Advanced setup mode, and safer BOOT button recovery actions
 
 This is still experimental. Treat the project as a working reference build for one known device, not as a universal Tuya bridge.
 
@@ -122,6 +123,49 @@ Available dashboard actions:
 - Reset HomeKit pairing
 
 The dashboard includes a PWA manifest and local icon endpoint, so phones can add the dashboard bookmark to the home screen. This is still a local web dashboard, not a native app.
+
+## Backup, Restore and Health
+
+The dashboard can export the current configuration as:
+
+```text
+tuya-homekit-bridge-config.json
+```
+
+By default, exports exclude sensitive values:
+
+- Wi-Fi password
+- Tuya local key
+
+Only use **Include sensitive values** when you really need a full backup. A config file with secrets can let someone access your Wi-Fi or control your Tuya device.
+
+The setup/admin UI can import a pasted or uploaded JSON config. Imported values are validated and previewed before applying. Unknown fields are ignored with warnings. If the import does not include secrets, the ESP32 keeps the currently saved Wi-Fi password and Tuya local key when possible.
+
+The dashboard also shows a simple health status:
+
+- `Healthy`: Wi-Fi, Tuya polling, memory and HomeKit look OK.
+- `Warning`: weak Wi-Fi, several missed polls, high Tuya latency, mDNS failure, or low heap.
+- `Error`: Wi-Fi disconnected, repeated Tuya failures, HomeKit not initialized, or critical memory pressure.
+
+The health panel includes a short reason, last update time, and suggested fix.
+
+## Safe Mode and Factory Reset
+
+The ESP32 BOOT / GPIO0 button has two recovery actions:
+
+| Button hold | Action | What it does |
+| ----------- | ------ | ------------ |
+| 5 seconds | Setup Mode | Starts setup AP and web portal without erasing saved configuration |
+| 15 seconds | Factory Reset | Clears saved configuration and HomeKit pairing data, then restarts into first-boot setup |
+
+Use 5 seconds when Wi-Fi changed, mDNS is not reachable, or you need to edit the dashboard settings. Use 15 seconds only when you want to start over.
+
+## Simple and Advanced Setup
+
+The wizard has two modes:
+
+- `Simple`: shows the fields most beginners need for Wi-Fi, Tuya credentials, HomeKit name, test connection, and save.
+- `Advanced`: shows protocol version, relay DPS, polling interval, hostname, DPS scan, diagnostics, and backup/import controls.
 
 ### Experimental LAN Scan
 
@@ -452,13 +496,19 @@ Use **Test Tuya connection** before saving if you want a quick check from the se
 
 Click **Save and restart**. On the next boot, the ESP32 loads the saved config from flash, connects to Wi-Fi, starts HomeSpan, and exposes the plug to HomeKit.
 
-After normal boot, Serial Monitor prints an admin URL with the ESP32's LAN IP address, for example:
+After normal boot, open the friendly dashboard URL:
+
+```text
+http://tuya-homekit.local:8080/
+```
+
+If mDNS is not available on your network, Serial Monitor also prints a fallback URL with the ESP32's LAN IP address, for example:
 
 ```text
 Admin URL: http://192.168.1.50:8080
 ```
 
-Open that URL from the same Wi-Fi network to edit the saved Tuya/HomeKit settings, test the Tuya connection, clear bridge configuration, or clear HomeKit pairing on the ESP32. The admin page is plain local HTTP without login, so use it only on a trusted LAN or IoT network.
+Open the dashboard from the same Wi-Fi network to edit the saved Tuya/HomeKit settings, test the Tuya connection, clear bridge configuration, or clear HomeKit pairing on the ESP32. The admin page is plain local HTTP without login, so use it only on a trusted LAN or IoT network.
 
 If Wi-Fi connection fails repeatedly during boot, the ESP32 falls back to setup mode and periodically retries the saved Wi-Fi. If the network comes back, the ESP32 restarts into normal HomeSpan mode.
 
@@ -468,9 +518,10 @@ Reset options:
 - **Clear saved config:** use the admin/setup page button. This removes Wi-Fi and Tuya settings, restarts, and opens setup mode. It does not clear HomeKit pairing.
 - **Clear HomeKit pairing:** use the admin page button, then remove the accessory in Apple Home too.
 - **Restart:** press `EN`. This is the ESP32 hardware reset button.
-- **Factory reset:** while the ESP32 is running, hold `BOOT / GPIO0` for about 8 seconds. This clears bridge configuration, HomeKit pairing data, and the HomeKit device ID, then restarts into setup mode.
+- **Setup Mode:** hold `BOOT / GPIO0` for about 5 seconds. This starts setup without erasing saved configuration.
+- **Factory reset:** hold `BOOT / GPIO0` for about 15 seconds. This clears bridge configuration, HomeKit pairing data, and the HomeKit device ID, then restarts into setup mode.
 
-Holding GPIO0 / BOOT while the ESP32 starts still forces setup mode by clearing bridge configuration. On some dev boards, holding BOOT before reset enters the bootloader; if that happens, release BOOT and reset again.
+Holding GPIO0 / BOOT during boot uses the same timing: release after 5 seconds for Setup Mode, or keep holding for 15 seconds for Factory Reset. On some dev boards, holding BOOT before reset enters the bootloader; if that happens, release BOOT and reset again.
 
 Status LED:
 
@@ -574,6 +625,10 @@ The biggest unknown is Tuya firmware behavior. A future plug firmware update cou
 | Relay DPS not found | Plug uses a different datapoint | Use **Scan DPS** and choose the correct boolean DPS |
 | HomeKit state updates slowly | Polling interval is high | Lower polling interval if your network and plug tolerate it |
 | Admin page is unreachable | ESP32 IP changed | Check Serial Monitor or reserve the ESP32 IP in your router |
+| I cannot open the dashboard | Wi-Fi changed or mDNS issue | Hold BOOT for 5s to enter Setup Mode |
+| I want to start over | Bad config or wrong HomeKit pairing | Hold BOOT for 15s for Factory Reset |
+| Import fails | Invalid JSON or unsupported values | Check validation warnings in the preview |
+| Exported config does not contain `local_key` | Secrets are excluded by default | Re-export with sensitive values only if you need a full private backup |
 
 ### TinyTuya finds the device but status fails
 

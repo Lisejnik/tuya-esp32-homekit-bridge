@@ -291,6 +291,8 @@ The v2.1 setup page is split into steps:
 5. HomeKit settings
 6. Save and reboot
 
+Use `Simple` mode if you only want the normal setup fields. Switch to `Advanced` when you need protocol version, relay DPS, polling interval, hostname, DPS scan, diagnostics, or backup/import tools.
+
 The **Find Tuya devices** button is experimental. It looks for devices with Tuya-like local ports open on the same network. If it finds something, use **Use this IP**, then still enter the correct Device ID and `local_key`.
 
 The **Test Tuya connection** button gives more detail than just success or failure. It can show whether the IP and port are reachable, whether the local key/protocol look wrong, whether the relay DPS was found, and how long the response took.
@@ -325,12 +327,26 @@ Open that address from the same Wi-Fi network if you need to edit saved settings
 
 The dashboard also shows current HomeKit, Tuya and network status:
 
+- health status, reason, last update and suggested fix
 - HomeKit name, type, relay state and polling interval
 - Tuya IP, protocol, relay DPS, last response, latency and failed poll count
 - Wi-Fi SSID, ESP32 IP, local hostname, dashboard URL, signal strength, uptime and free heap
 - a small diagnostics log with recent Wi-Fi, HomeSpan and Tuya events
 
 You can add the dashboard to a phone home screen like a local web app. This is still just the ESP32 web dashboard, not a native mobile app.
+
+Backup:
+
+- **Export config** downloads `tuya-homekit-bridge-config.json`.
+- Wi-Fi password and Tuya `local_key` are excluded by default.
+- Use **Include sensitive values** only for a private full backup. Anyone with that file may be able to access your Wi-Fi or control your Tuya plug.
+
+Restore:
+
+- Paste or upload a JSON config.
+- Click **Preview import** first.
+- If the preview is correct, click **Apply import and restart**.
+- If the JSON does not contain secrets, the ESP32 keeps the saved Wi-Fi password and Tuya local key when possible.
 
 The admin page is plain local HTTP without login, so use it only on a trusted LAN or IoT network. Do not expose it to the internet.
 
@@ -340,9 +356,10 @@ Reset options:
 - To clear only Wi-Fi and Tuya settings, use **Clear saved config** on the admin/setup page.
 - To clear HomeKit pairing, use **Clear HomeKit pairing** on the admin page and remove the accessory in Apple Home too.
 - To restart the ESP32, press **EN**.
-- To start fully from scratch, hold the ESP32 **BOOT / GPIO0** button for about 8 seconds while it is running. This clears bridge configuration, HomeKit pairing data, and the HomeKit device ID, then restarts into setup mode.
+- To enter Setup Mode without erasing saved settings, hold **BOOT / GPIO0** for about 5 seconds.
+- To start fully from scratch, hold **BOOT / GPIO0** for about 15 seconds. This clears bridge configuration, HomeKit pairing data, and the HomeKit device ID, then restarts into setup mode.
 
-Holding BOOT while the ESP32 starts still forces setup mode by clearing bridge configuration. On some ESP32 boards, holding BOOT too early enters flashing mode instead; if that happens, release BOOT and reset again.
+Holding BOOT while the ESP32 starts uses the same timing: release after 5 seconds for Setup Mode, or keep holding for 15 seconds for Factory Reset. On some ESP32 boards, holding BOOT too early enters flashing mode instead; if that happens, release BOOT and reset again.
 
 Status LED:
 

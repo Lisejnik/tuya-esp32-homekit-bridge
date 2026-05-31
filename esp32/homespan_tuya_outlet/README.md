@@ -74,11 +74,16 @@ The dashboard includes a PWA manifest and local SVG icon endpoint, so a phone ca
 
 The admin dashboard shows:
 
+- health status with reason, last update and suggested fix
 - HomeKit accessory name, type, relay state and polling interval
 - Tuya IP, protocol version, relay DPS, last response status, last latency and failed poll count
 - Wi-Fi SSID, ESP32 IP, RSSI, uptime and free heap
 - local hostname and dashboard management URL
 - recent diagnostics events from a small in-memory log
+
+The dashboard can export `tuya-homekit-bridge-config.json`. Sensitive values are excluded by default. Only enable **Include sensitive values** for a private full backup, because that file may contain Wi-Fi and Tuya secrets.
+
+The setup/admin UI can import pasted or uploaded JSON. The sketch validates and previews imported values before applying them. If secrets are missing, existing saved secrets are kept when possible.
 
 The admin page is plain local HTTP without login, so use it only on a trusted LAN or IoT network. Do not expose it to the internet.
 
@@ -90,9 +95,15 @@ If Wi-Fi connection fails repeatedly during boot, the sketch falls back to setup
 - To clear only Wi-Fi and Tuya settings, use **Clear saved config** on the admin/setup page.
 - To clear HomeKit pairing, use **Clear HomeKit pairing** on the admin page and remove the accessory in Apple Home too.
 - To restart the ESP32, press **EN**.
-- To start fully from scratch, hold the ESP32 **BOOT / GPIO0** button for about 8 seconds while it is running. This clears bridge configuration, HomeKit pairing data, and the HomeKit device ID, then restarts into setup mode.
+- To enter Setup Mode without erasing saved configuration, hold **BOOT / GPIO0** for about 5 seconds during boot or while running.
+- To start fully from scratch, hold **BOOT / GPIO0** for about 15 seconds. This clears bridge configuration, HomeKit pairing data, and the HomeKit device ID, then restarts into setup mode.
 
-Holding BOOT while the ESP32 starts still forces setup mode by clearing bridge configuration. On some dev boards, holding BOOT before reset enters the bootloader; if that happens, release BOOT and reset again.
+On some dev boards, holding BOOT before reset enters the bootloader; if that happens, release BOOT and reset again. The Serial Monitor prints progressive button-hold messages so you can see whether Setup Mode or Factory Reset is about to happen.
+
+## Simple and Advanced Wizard Mode
+
+- `Simple` mode keeps the setup page focused on Wi-Fi, Tuya IP, device ID, local key, HomeKit name, test connection and save.
+- `Advanced` mode shows protocol version, relay DPS, polling interval, hostname, DPS scan, diagnostics and backup/import controls.
 
 ## Status LED
 
