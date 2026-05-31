@@ -34,14 +34,15 @@ For maintainers preparing a GitHub release, use:
 
 ## Current Status
 
-Release candidate for `v0.1.0`:
+Current development branch for the next version:
 
 - tested with one Tesla Smart Plug / Tuya protocol `3.4`
 - local Python control works through TinyTuya
 - ESP32 local Tuya POC works for `status`, `on`, and `off`
 - HomeSpan sketch exposes the plug as an Apple HomeKit `Outlet`
+- HomeSpan sketch has a first setup web wizard, so users no longer need to edit source code for normal setup
 
-This is still experimental. Treat the first release as a working reference build for one known device, not as a universal Tuya bridge.
+This is still experimental. Treat the project as a working reference build for one known device, not as a universal Tuya bridge.
 
 ## Visual Overview
 
@@ -288,7 +289,7 @@ Only continue when this works reliably.
 
 This step deliberately avoids HomeKit. It proves that the ESP32 can control the plug locally before adding another layer.
 
-## Phase 3: HomeKit Outlet with HomeSpan
+## Phase 3: HomeKit Outlet with HomeSpan Setup Wizard
 
 Use:
 
@@ -301,27 +302,59 @@ Install in Arduino IDE:
 - ESP32 board support
 - HomeSpan library
 
-Generate or update `secrets.h`:
+Recommended Arduino IDE settings for a common 4 MB ESP32 board:
 
-```bash
-python scripts/export_esp32_secrets.py
+- Board: `ESP32 Dev Module`
+- Partition Scheme: `No OTA (2MB APP/2MB SPIFFS)` or larger
+- Upload Speed: any stable value for your board
+
+The default ESP32 partition is usually too small for HomeSpan plus the setup web wizard.
+
+Flash the sketch, open Serial Monitor at `115200`, and wait for setup mode.
+
+On first boot, or when no saved config exists, the ESP32 starts its own setup Wi-Fi access point:
+
+```text
+TuyaHomeKit-Setup
 ```
 
-Edit:
+The setup Wi-Fi password is randomly generated for each setup session and printed in Serial Monitor. Connect to that Wi-Fi network from a phone or computer and open:
 
-```bash
-nano esp32/homespan_tuya_outlet/secrets.h
+```text
+http://192.168.4.1/
 ```
 
 Fill:
 
-```cpp
-#define WIFI_SSID "..."
-#define WIFI_PASSWORD "..."
-#define HOMEKIT_ACCESSORY_NAME "Tuya HomeKit Outlet"
-```
+- Wi-Fi SSID
+- Wi-Fi password
+- Tuya plug IP address
+- Tuya device ID
+- Tuya local key
+- Tuya protocol version, default `3.4`
+- relay DPS, default `1`
+- HomeKit accessory name
+- polling interval in seconds, default `30`
 
-Flash the sketch, then set the HomeKit pairing code before adding the ESP32 in Apple Home.
+The setup page uses plain HTTP on the temporary ESP32 setup network. Configure it near the ESP32 and do not leave setup mode running longer than needed. Saved Wi-Fi passwords and Tuya local keys are stored in ESP32 Preferences in plaintext, but they are not shown back in the form; leave those fields blank to keep existing saved values when reconfiguring. Use an IoT or guest Wi-Fi network if possible.
+
+Use **Test Tuya connection** before saving if you want a quick check from the setup page.
+
+Click **Save and restart**. On the next boot, the ESP32 loads the saved config from flash, connects to Wi-Fi, starts HomeSpan, and exposes the plug to HomeKit.
+
+If Wi-Fi connection fails repeatedly during boot, the ESP32 falls back to setup mode and periodically retries the saved Wi-Fi. If the network comes back, the ESP32 restarts into normal HomeSpan mode.
+
+To clear the bridge configuration, hold GPIO0 / BOOT while the ESP32 starts. On some dev boards, holding BOOT before reset enters the bootloader; if that happens, press BOOT just after reset or use **Clear saved config** while setup mode is active. This does not clear HomeSpan pairing data.
+
+The HomeSpan sketch no longer requires `esp32/homespan_tuya_outlet/secrets.h`. Secrets are stored in ESP32 flash memory through the setup wizard and must still never be committed or shared.
+
+After the ESP32 is configured and has restarted, set the HomeKit pairing code before adding it in Apple Home.
+
+Equivalent `arduino-cli` compile check:
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=no_ota esp32/homespan_tuya_outlet
+```
 
 ### Set HomeKit Pairing Code
 
@@ -358,7 +391,7 @@ The HomeSpan sketch exposes:
 
 `OutletInUse` is currently not real power detection. It only means the relay is on.
 
-The sketch polls local Tuya status every 30 seconds so HomeKit can notice changes made from Smart Life or the physical button.
+The sketch polls local Tuya status at the configured interval, default 30 seconds, so HomeKit can notice changes made from Smart Life or the physical button.
 
 ## Stability Notes
 
@@ -388,9 +421,15 @@ Check:
 
 Go back to the ESP32 local POC and verify `status/on/off` over Serial Monitor.
 
+If the POC works, restart the HomeSpan sketch into setup mode by holding GPIO0 / BOOT while the sketch starts. On some dev boards, pressing BOOT too early enters the bootloader. Re-enter the Tuya IP, device ID, local key, protocol version, and relay DPS, then use **Test Tuya connection**.
+
+### ESP32 always starts setup mode
+
+Check Serial Monitor. The sketch prints the setup reason, such as missing config, invalid saved local key, or repeated Wi-Fi connection failure.
+
 ### HomeKit shows stale state
 
-The sketch polls every 30 seconds. Wait for one poll cycle.
+The sketch polls at the configured interval. Wait for one poll cycle.
 
 If state never updates, check Serial Monitor for Tuya status/decrypt errors.
 

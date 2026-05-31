@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate an ignored ESP32 secrets.h file from local .env values."""
+"""Generate an ignored ESP32 secrets.h file for the local Tuya POC."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = PROJECT_ROOT / ".env"
 OUT_PATHS = (
     PROJECT_ROOT / "esp32" / "tuya_local_poc" / "secrets.h",
-    PROJECT_ROOT / "esp32" / "homespan_tuya_outlet" / "secrets.h",
 )
 
 
@@ -62,18 +61,12 @@ def read_define(path: Path, name: str, default: str) -> str:
 def render_content(path: Path, device_id: str, device_ip: str, local_key: str) -> str:
     wifi_ssid = read_define(path, "WIFI_SSID", "CHANGE_ME")
     wifi_password = read_define(path, "WIFI_PASSWORD", "CHANGE_ME")
-    accessory_name = read_define(path, "HOMEKIT_ACCESSORY_NAME", "Tuya HomeKit Outlet")
-    manufacturer = read_define(path, "HOMEKIT_MANUFACTURER", "Tuya Local Bridge")
-    model = read_define(path, "HOMEKIT_MODEL", "Tuya Plug via ESP32")
     return (
         "#pragma once\n\n"
         "// This file is generated from .env and is ignored by git.\n"
-        "// Existing Wi-Fi credentials and accessory metadata are preserved.\n"
+        "// Existing Wi-Fi credentials are preserved.\n"
         f'#define WIFI_SSID "{c_string(wifi_ssid)}"\n'
         f'#define WIFI_PASSWORD "{c_string(wifi_password)}"\n\n'
-        f'#define HOMEKIT_ACCESSORY_NAME "{c_string(accessory_name)}"\n'
-        f'#define HOMEKIT_MANUFACTURER "{c_string(manufacturer)}"\n'
-        f'#define HOMEKIT_MODEL "{c_string(model)}"\n\n'
         f'#define TUYA_DEVICE_ID "{c_string(device_id)}"\n'
         f"#define TUYA_DEVICE_IP IPAddress({ip_initializer(device_ip)})\n"
         f'#define TUYA_LOCAL_KEY "{c_string(local_key)}"\n'

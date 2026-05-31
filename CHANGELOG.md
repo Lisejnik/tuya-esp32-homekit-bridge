@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Add first ESP32 setup Wi-Fi access point and web configuration wizard.
+- Store HomeSpan sketch configuration in ESP32 flash using Preferences.
+- Add setup form fields for Wi-Fi, Tuya plug, HomeKit name, relay DPS, and polling interval.
+- Add setup-page Tuya connection test and configuration reset action.
+- Add GPIO0 / BOOT reset path to clear saved configuration.
+- Keep ESP32 local Tuya POC on generated `secrets.h` while removing `secrets.h` from the HomeSpan setup flow.
+
 ## v0.1.0 - Initial Experimental Release
 
 - Add Python TinyTuya scripts for LAN discovery and local plug control.

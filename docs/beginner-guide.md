@@ -48,7 +48,7 @@ Do not use this project for heaters, pumps, medical devices, unattended applianc
 - `local_key`: a 16-character secret used by the local Tuya protocol.
 - `Tuya protocol version`: usually `3.3`, `3.4`, or `3.5`; this project currently targets `3.4` on ESP32.
 - `DPS`: Tuya datapoint. For the tested plug, relay on/off is DPS `1`.
-- `secrets.h`: a local Arduino file containing Wi-Fi and Tuya secrets. It must not be committed.
+- `secrets.h`: a local Arduino file used only by the ESP32 Tuya local POC. The HomeKit sketch uses the web setup wizard instead.
 
 ## Phase 0: Download the Project
 
@@ -189,10 +189,9 @@ This creates:
 
 ```text
 esp32/tuya_local_poc/secrets.h
-esp32/homespan_tuya_outlet/secrets.h
 ```
 
-Open both generated files later if needed, but do not commit them.
+Open this generated file later if needed, but do not commit it.
 
 ## Phase 8: Flash the ESP32 Tuya Local POC
 
@@ -235,23 +234,62 @@ In Arduino IDE, open:
 esp32/homespan_tuya_outlet/homespan_tuya_outlet.ino
 ```
 
-Edit:
+For a common ESP32 Dev Module, select:
 
-```text
-esp32/homespan_tuya_outlet/secrets.h
-```
+- Partition Scheme: `No OTA (2MB APP/2MB SPIFFS)`
 
-Fill Wi-Fi and optionally rename the accessory:
-
-```cpp
-#define WIFI_SSID "your_wifi_name"
-#define WIFI_PASSWORD "your_wifi_password"
-#define HOMEKIT_ACCESSORY_NAME "Tuya HomeKit Outlet"
-```
+The default partition can be too small for HomeSpan plus the setup page.
 
 Upload the sketch and open Serial Monitor at `115200`.
 
-## Phase 10: Set HomeKit Pairing Code
+On first boot, the ESP32 should start setup mode and print:
+
+```text
+Setup AP SSID: TuyaHomeKit-Setup
+Setup URL: http://192.168.4.1
+```
+
+## Phase 10: Configure the ESP32 from the Web Page
+
+On your phone or computer, connect to this Wi-Fi network:
+
+```text
+TuyaHomeKit-Setup
+```
+
+Use the setup Wi-Fi password printed in Serial Monitor. It is randomly generated each time setup mode starts.
+
+Then open:
+
+```text
+http://192.168.4.1/
+```
+
+Fill the setup form:
+
+- Wi-Fi SSID
+- Wi-Fi password
+- Tuya plug IP address
+- Tuya device ID
+- Tuya local key
+- Tuya protocol version: `3.4`
+- relay DPS: `1`
+- HomeKit accessory name
+- polling interval: `30`
+
+The setup page uses plain HTTP on the temporary ESP32 setup network. Stay near the ESP32 while configuring it and save valid settings so setup mode turns off. Wi-Fi passwords and Tuya local keys are stored in ESP32 Preferences in plaintext, so use an IoT or guest Wi-Fi network if possible. If you open setup mode later, saved Wi-Fi passwords and Tuya local keys are not displayed; leave those fields blank to keep the saved values.
+
+Use **Test Tuya connection** if you want to verify the values before saving.
+
+Click **Save and restart**.
+
+After restart, the ESP32 should connect to your normal Wi-Fi and start HomeSpan.
+
+If it cannot connect to Wi-Fi, it will return to setup mode.
+
+To clear bridge configuration later, hold GPIO0 / BOOT while the ESP32 starts. On some ESP32 boards, holding BOOT too early enters flashing mode instead; if that happens, press BOOT just after reset or use **Clear saved config** when the setup page is open. This does not clear HomeSpan pairing data.
+
+## Phase 11: Set HomeKit Pairing Code
 
 In Serial Monitor, set your own 8-digit pairing code:
 
@@ -267,7 +305,7 @@ Apple Home displays HomeKit codes with hyphens. For example, `S 11223344` become
 112-23-344
 ```
 
-## Phase 11: Add to Apple Home
+## Phase 12: Add to Apple Home
 
 Open Apple Home and add a new accessory.
 

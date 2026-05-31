@@ -1,17 +1,26 @@
 #include <Arduino.h>
+#include <Preferences.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include <esp_system.h>
 #include <time.h>
 #include <vector>
 
 #include "HomeSpan.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/md.h"
-#include "secrets.h"
 
 namespace {
 
 constexpr uint16_t TUYA_PORT = 6668;
+constexpr char SETUP_AP_SSID[] = "TuyaHomeKit-Setup";
+constexpr char SETUP_AP_PASSWORD_PREFIX[] = "THK";
+constexpr char PREF_NAMESPACE[] = "tuya-hk";
+constexpr uint8_t RESET_CONFIG_PIN = 0;
+constexpr uint8_t WIFI_CONNECT_ATTEMPTS = 3;
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+constexpr uint32_t SETUP_WIFI_RETRY_INTERVAL_MS = 60000;
 constexpr uint32_t PREFIX_55AA = 0x000055AA;
 constexpr uint32_t SUFFIX_55AA = 0x0000AA55;
 constexpr uint8_t CMD_SESS_KEY_NEG_START = 0x03;
@@ -21,10 +30,25 @@ constexpr uint8_t CMD_CONTROL_NEW = 0x0D;
 constexpr uint8_t CMD_DP_QUERY_NEW = 0x10;
 constexpr size_t AES_BLOCK_SIZE = 16;
 constexpr size_t HMAC_SIZE = 32;
+constexpr uint32_t DEFAULT_POLL_INTERVAL_SECONDS = 30;
 
 const uint8_t LOCAL_NONCE[AES_BLOCK_SIZE] = {
     '0', '1', '2', '3', '4', '5', '6', '7',
     '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+};
+
+struct BridgeConfig {
+  String wifi_ssid;
+  String wifi_password;
+  String tuya_ip;
+  String tuya_device_id;
+  String tuya_local_key;
+  String tuya_protocol_version = "3.4";
+  String tuya_relay_dps = "1";
+  String homekit_accessory_name = "Tuya HomeKit Outlet";
+  String homekit_manufacturer = "Tuya Local Bridge";
+  String homekit_model = "Tuya Plug via ESP32";
+  uint32_t poll_interval_seconds = DEFAULT_POLL_INTERVAL_SECONDS;
 };
 
 struct TuyaResponse {
@@ -35,11 +59,20 @@ struct TuyaResponse {
   bool hmac_ok = false;
 };
 
+BridgeConfig config;
+Preferences preferences;
+WebServer setup_server(80);
 WiFiClient client;
 uint32_t sequence_number = 1;
 uint8_t real_key[AES_BLOCK_SIZE] = {0};
 uint8_t session_key[AES_BLOCK_SIZE] = {0};
 bool session_ready = false;
+bool setup_mode = false;
+bool homekit_started = false;
+bool setup_retry_saved_wifi = false;
+unsigned long last_setup_wifi_retry_ms = 0;
+
+String setup_ap_password;
 
 void appendU32(std::vector<uint8_t>& out, uint32_t value) {
   out.push_back((value >> 24) & 0xFF);
@@ -150,8 +183,264 @@ bool hmacSha256(const uint8_t* key, size_t key_len, const uint8_t* data,
   return mbedtls_md_hmac(info, key, key_len, data, data_len, out) == 0;
 }
 
+String htmlEscape(const String& value) {
+  String escaped;
+  escaped.reserve(value.length());
+  for (size_t i = 0; i < value.length(); i++) {
+    const char ch = value.charAt(i);
+    switch (ch) {
+      case '&':
+        escaped += F("&amp;");
+        break;
+      case '<':
+        escaped += F("&lt;");
+        break;
+      case '>':
+        escaped += F("&gt;");
+        break;
+      case '"':
+        escaped += F("&quot;");
+        break;
+      case '\'':
+        escaped += F("&#39;");
+        break;
+      default:
+        escaped += ch;
+        break;
+    }
+  }
+  return escaped;
+}
+
+bool parseTuyaIp(IPAddress& ip) {
+  return ip.fromString(config.tuya_ip);
+}
+
+uint32_t normalizedPollInterval(uint32_t seconds) {
+  if (seconds < 5) {
+    return 5;
+  }
+  if (seconds > 3600) {
+    return 3600;
+  }
+  return seconds;
+}
+
+bool isRelayDpsValid(const String& dps) {
+  if (dps.isEmpty() || dps.length() > 3) {
+    return false;
+  }
+  for (size_t i = 0; i < dps.length(); i++) {
+    if (!isDigit(dps.charAt(i))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool isPrintableAscii(const String& value) {
+  for (size_t i = 0; i < value.length(); i++) {
+    const char ch = value.charAt(i);
+    if (ch < 32 || ch > 126) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool isAlphaNumericString(const String& value) {
+  if (value.isEmpty()) {
+    return false;
+  }
+  for (size_t i = 0; i < value.length(); i++) {
+    const char ch = value.charAt(i);
+    if (!isAlphaNumeric(ch)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+String setupPasswordFromRandom() {
+  char password[16] = {0};
+  snprintf(password, sizeof(password), "%s%08lX%02lX",
+           SETUP_AP_PASSWORD_PREFIX, uint32_t(esp_random()),
+           uint32_t(esp_random() & 0xFF));
+  return String(password);
+}
+
+bool validateConfig(const BridgeConfig& candidate, String& error) {
+  IPAddress ip;
+  if (candidate.wifi_ssid.isEmpty()) {
+    error = "Wi-Fi SSID is required.";
+    return false;
+  }
+  if (candidate.wifi_ssid.length() > 32 || !isPrintableAscii(candidate.wifi_ssid)) {
+    error = "Wi-Fi SSID must be printable ASCII and at most 32 characters.";
+    return false;
+  }
+  if (!candidate.wifi_password.isEmpty() &&
+      (candidate.wifi_password.length() < 8 ||
+       candidate.wifi_password.length() > 63 ||
+       !isPrintableAscii(candidate.wifi_password))) {
+    error = "Wi-Fi password must be empty for open Wi-Fi or 8-63 printable ASCII characters.";
+    return false;
+  }
+  if (!ip.fromString(candidate.tuya_ip)) {
+    error = "Tuya plug IP address is invalid.";
+    return false;
+  }
+  if (candidate.tuya_device_id.isEmpty()) {
+    error = "Tuya device ID is required.";
+    return false;
+  }
+  if (candidate.tuya_device_id.length() > 32 ||
+      !isAlphaNumericString(candidate.tuya_device_id)) {
+    error = "Tuya device ID must be alphanumeric and at most 32 characters.";
+    return false;
+  }
+  if (candidate.tuya_local_key.length() != AES_BLOCK_SIZE) {
+    error = "Tuya local key must be exactly 16 characters.";
+    return false;
+  }
+  if (!isPrintableAscii(candidate.tuya_local_key)) {
+    error = "Tuya local key must use printable ASCII characters.";
+    return false;
+  }
+  if (candidate.tuya_protocol_version != "3.4") {
+    error = "This first wizard version only supports Tuya protocol 3.4.";
+    return false;
+  }
+  if (!isRelayDpsValid(candidate.tuya_relay_dps)) {
+    error = "Relay DPS must be a numeric value up to 3 digits.";
+    return false;
+  }
+  if (candidate.homekit_accessory_name.isEmpty()) {
+    error = "HomeKit accessory name is required.";
+    return false;
+  }
+  if (candidate.homekit_accessory_name.length() > 40 ||
+      !isPrintableAscii(candidate.homekit_accessory_name)) {
+    error = "HomeKit accessory name must be printable ASCII and at most 40 characters.";
+    return false;
+  }
+  return true;
+}
+
+bool loadConfig() {
+  if (!preferences.begin(PREF_NAMESPACE, true)) {
+    Serial.println("Could not open Preferences for reading.");
+    return false;
+  }
+  const bool configured = preferences.getBool("configured", false);
+  if (!configured) {
+    preferences.end();
+    return false;
+  }
+
+  config.wifi_ssid = preferences.getString("wifi_ssid", "");
+  config.wifi_password = preferences.getString("wifi_pass", "");
+  config.tuya_ip = preferences.getString("tuya_ip", "");
+  config.tuya_device_id = preferences.getString("tuya_id", "");
+  config.tuya_local_key = preferences.getString("tuya_key", "");
+  config.tuya_protocol_version = preferences.getString("tuya_ver", "3.4");
+  config.tuya_relay_dps = preferences.getString("relay_dps", "1");
+  config.homekit_accessory_name =
+      preferences.getString("hk_name", "Tuya HomeKit Outlet");
+  config.homekit_manufacturer =
+      preferences.getString("hk_mfr", "Tuya Local Bridge");
+  config.homekit_model =
+      preferences.getString("hk_model", "Tuya Plug via ESP32");
+  config.poll_interval_seconds =
+      normalizedPollInterval(preferences.getUInt("poll_sec",
+                                                 DEFAULT_POLL_INTERVAL_SECONDS));
+  preferences.end();
+
+  String error;
+  if (!validateConfig(config, error)) {
+    Serial.print("Saved configuration is invalid: ");
+    Serial.println(error);
+    return false;
+  }
+  return true;
+}
+
+bool saveConfig(const BridgeConfig& candidate, String& error) {
+  BridgeConfig normalized = candidate;
+  normalized.poll_interval_seconds =
+      normalizedPollInterval(normalized.poll_interval_seconds);
+  if (!validateConfig(normalized, error)) {
+    return false;
+  }
+
+  if (!preferences.begin(PREF_NAMESPACE, false)) {
+    error = "Could not open ESP32 Preferences for writing.";
+    return false;
+  }
+  preferences.putString("wifi_ssid", normalized.wifi_ssid);
+  preferences.putString("wifi_pass", normalized.wifi_password);
+  preferences.putString("tuya_ip", normalized.tuya_ip);
+  preferences.putString("tuya_id", normalized.tuya_device_id);
+  preferences.putString("tuya_key", normalized.tuya_local_key);
+  preferences.putString("tuya_ver", normalized.tuya_protocol_version);
+  preferences.putString("relay_dps", normalized.tuya_relay_dps);
+  preferences.putString("hk_name", normalized.homekit_accessory_name);
+  preferences.putString("hk_mfr", normalized.homekit_manufacturer);
+  preferences.putString("hk_model", normalized.homekit_model);
+  preferences.putUInt("poll_sec", normalized.poll_interval_seconds);
+  preferences.putBool("configured", true);
+  preferences.end();
+  config = normalized;
+  return true;
+}
+
+void clearConfig() {
+  if (!preferences.begin(PREF_NAMESPACE, false)) {
+    Serial.println("Could not open Preferences for clearing.");
+    return;
+  }
+  preferences.clear();
+  preferences.end();
+  Serial.println("Saved configuration cleared.");
+}
+
+BridgeConfig configFromRequest() {
+  BridgeConfig candidate;
+  candidate.wifi_ssid = setup_server.arg("wifi_ssid");
+  candidate.wifi_password = setup_server.arg("wifi_password");
+  candidate.tuya_ip = setup_server.arg("tuya_ip");
+  candidate.tuya_device_id = setup_server.arg("tuya_device_id");
+  candidate.tuya_local_key = setup_server.arg("tuya_local_key");
+  candidate.tuya_protocol_version = setup_server.arg("tuya_protocol_version");
+  candidate.tuya_relay_dps = setup_server.arg("tuya_relay_dps");
+  candidate.homekit_accessory_name = setup_server.arg("homekit_accessory_name");
+  candidate.homekit_manufacturer = "Tuya Local Bridge";
+  candidate.homekit_model = "Tuya Plug via ESP32";
+  candidate.poll_interval_seconds =
+      uint32_t(setup_server.arg("poll_interval_seconds").toInt());
+  if (candidate.wifi_password.isEmpty() && !config.wifi_password.isEmpty()) {
+    candidate.wifi_password = config.wifi_password;
+  }
+  if (candidate.tuya_local_key.isEmpty() && !config.tuya_local_key.isEmpty()) {
+    candidate.tuya_local_key = config.tuya_local_key;
+  }
+  if (candidate.tuya_protocol_version.isEmpty()) {
+    candidate.tuya_protocol_version = "3.4";
+  }
+  if (candidate.tuya_relay_dps.isEmpty()) {
+    candidate.tuya_relay_dps = "1";
+  }
+  if (candidate.homekit_accessory_name.isEmpty()) {
+    candidate.homekit_accessory_name = "Tuya HomeKit Outlet";
+  }
+  if (candidate.poll_interval_seconds == 0) {
+    candidate.poll_interval_seconds = DEFAULT_POLL_INTERVAL_SECONDS;
+  }
+  return candidate;
+}
+
 bool parseLocalKey() {
-  const char* key = TUYA_LOCAL_KEY;
+  const char* key = config.tuya_local_key.c_str();
   size_t length = strlen(key);
   if (length != AES_BLOCK_SIZE) {
     Serial.printf("LOCAL_KEY must be 16 bytes, got %u.\n", unsigned(length));
@@ -165,12 +454,18 @@ bool connectTuya() {
   if (client.connected()) {
     return true;
   }
+  IPAddress tuya_ip;
+  if (!parseTuyaIp(tuya_ip)) {
+    Serial.print("Invalid Tuya plug IP address: ");
+    Serial.println(config.tuya_ip);
+    return false;
+  }
   client.stop();
   Serial.print("Connecting to Tuya plug ");
-  Serial.print(TUYA_DEVICE_IP);
+  Serial.print(tuya_ip);
   Serial.print(":");
   Serial.println(TUYA_PORT);
-  if (!client.connect(TUYA_DEVICE_IP, TUYA_PORT, 5000)) {
+  if (!client.connect(tuya_ip, TUYA_PORT, 5000)) {
     Serial.println("TCP connection failed.");
     return false;
   }
@@ -269,9 +564,12 @@ bool sendEncrypted(uint32_t cmd, const uint8_t* clear, size_t clear_len,
                    TuyaResponse* response) {
   std::vector<uint8_t> message_clear;
   if (prepend_version) {
-    const uint8_t version_header[15] = {
-        '3', '.', '4', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    };
+    uint8_t version_header[15] = {0};
+    size_t version_len = config.tuya_protocol_version.length();
+    if (version_len > 3) {
+      version_len = 3;
+    }
+    memcpy(version_header, config.tuya_protocol_version.c_str(), version_len);
     appendBytes(message_clear, version_header, sizeof(version_header));
   }
   appendBytes(message_clear, clear, clear_len);
@@ -444,8 +742,8 @@ bool tuyaReadPower(bool& is_on) {
   }
 
   String text = payloadJsonText(clear);
-  String true_pattern = String("\"") + TUYA_RELAY_DPS + "\":true";
-  String false_pattern = String("\"") + TUYA_RELAY_DPS + "\":false";
+  String true_pattern = String("\"") + config.tuya_relay_dps + "\":true";
+  String false_pattern = String("\"") + config.tuya_relay_dps + "\":false";
   text.replace(" ", "");
   if (text.indexOf(true_pattern) >= 0) {
     is_on = true;
@@ -474,9 +772,15 @@ bool tuyaSwitch(bool on) {
   }
 
   char payload[160] = {0};
-  snprintf(payload, sizeof(payload),
-           "{\"protocol\":5,\"t\":%ld,\"data\":{\"dps\":{\"%s\":%s}}}",
-           long(now), TUYA_RELAY_DPS, on ? "true" : "false");
+  const int payload_len =
+      snprintf(payload, sizeof(payload),
+               "{\"protocol\":5,\"t\":%ld,\"data\":{\"dps\":{\"%s\":%s}}}",
+               long(now), config.tuya_relay_dps.c_str(), on ? "true" : "false");
+  if (payload_len < 0 || size_t(payload_len) >= sizeof(payload)) {
+    Serial.println("Tuya switch payload was too long.");
+    resetTuyaSession();
+    return false;
+  }
 
   Serial.print("Sending local Tuya command: ");
   Serial.println(on ? "ON" : "OFF");
@@ -501,17 +805,203 @@ bool tuyaSwitch(bool on) {
   return true;
 }
 
-void connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+String setupPage(const String& message) {
+  String page;
+  page.reserve(9000);
+  page += F("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
+  page += F("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+  page += F("<title>Tuya HomeKit Setup</title><style>");
+  page += F(":root{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#14212b;background:#f6f8fa}");
+  page += F("body{margin:0;padding:24px}.wrap{max-width:760px;margin:0 auto;background:white;border:1px solid #d8dee4;border-radius:8px;padding:24px}");
+  page += F("h1{margin:0 0 8px;font-size:28px}.hint{color:#57606a;margin-top:0}.grid{display:grid;gap:14px}");
+  page += F("label{display:grid;gap:6px;font-weight:600}input{font:inherit;padding:10px;border:1px solid #d0d7de;border-radius:6px}");
+  page += F("button{font:inherit;border:0;border-radius:6px;padding:10px 14px;background:#008b8b;color:white;font-weight:700;cursor:pointer}");
+  page += F("button.secondary{background:#24292f}button.danger{background:#b42318}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}");
+  page += F(".msg{margin:16px 0;padding:12px;border-radius:6px;background:#ddf4ff;border:1px solid #54aeef}.foot{margin-top:18px;color:#57606a;font-size:14px}");
+  page += F("</style></head><body><main class=\"wrap\"><h1>Tuya HomeKit Setup</h1>");
+  page += F("<p class=\"hint\">Enter the local Tuya plug values. They are stored only in ESP32 flash memory. The setup Wi-Fi password is printed in Serial Monitor.</p>");
+  if (!message.isEmpty()) {
+    page += F("<div class=\"msg\">");
+    page += htmlEscape(message);
+    page += F("</div>");
+  }
+  page += F("<form id=\"setup\" method=\"post\" action=\"/save\"><div class=\"grid\">");
+  page += F("<label>Wi-Fi SSID<input name=\"wifi_ssid\" required value=\"");
+  page += htmlEscape(config.wifi_ssid);
+  page += F("\"></label>");
+  page += F("<label>Wi-Fi password<input name=\"wifi_password\" type=\"password\" value=\"");
+  page += F("\" placeholder=\"Leave blank to keep saved password\"></label>");
+  page += F("<label>Tuya plug IP address<input name=\"tuya_ip\" required placeholder=\"192.168.1.123\" value=\"");
+  page += htmlEscape(config.tuya_ip);
+  page += F("\"></label>");
+  page += F("<label>Tuya device ID<input name=\"tuya_device_id\" required value=\"");
+  page += htmlEscape(config.tuya_device_id);
+  page += F("\"></label>");
+  page += F("<label>Tuya local key<input name=\"tuya_local_key\" maxlength=\"16\" value=\"");
+  page += F("\" placeholder=\"Leave blank to keep saved key\"></label>");
+  page += F("<label>Tuya protocol version<input name=\"tuya_protocol_version\" required value=\"");
+  page += htmlEscape(config.tuya_protocol_version);
+  page += F("\"></label>");
+  page += F("<label>Relay DPS<input name=\"tuya_relay_dps\" required value=\"");
+  page += htmlEscape(config.tuya_relay_dps);
+  page += F("\"></label>");
+  page += F("<label>HomeKit accessory name<input name=\"homekit_accessory_name\" required value=\"");
+  page += htmlEscape(config.homekit_accessory_name);
+  page += F("\"></label>");
+  page += F("<label>Polling interval, seconds<input name=\"poll_interval_seconds\" type=\"number\" min=\"5\" max=\"3600\" value=\"");
+  page += String(config.poll_interval_seconds);
+  page += F("\"></label></div><div class=\"actions\">");
+  page += F("<button type=\"submit\">Save and restart</button>");
+  page += F("<button class=\"secondary\" type=\"button\" id=\"test\">Test Tuya connection</button>");
+  page += F("<button class=\"danger\" type=\"button\" id=\"reset\">Clear saved config</button>");
+  page += F("</div></form><p class=\"foot\" id=\"result\">Setup AP: ");
+  page += SETUP_AP_SSID;
+  page += F(" · Password is printed in Serial Monitor · Open http://192.168.4.1/ if this page does not appear automatically.</p>");
+  page += F("<script>const form=document.getElementById('setup');const result=document.getElementById('result');");
+  page += F("document.getElementById('test').onclick=async()=>{result.textContent='Testing...';try{const r=await fetch('/test',{method:'POST',body:new FormData(form)});result.textContent=await r.text();}catch(e){result.textContent='Test request failed.'}};");
+  page += F("document.getElementById('reset').onclick=async()=>{if(confirm('Clear saved configuration and restart setup mode?')){const r=await fetch('/reset',{method:'POST'});result.textContent=await r.text();}};");
+  page += F("</script></main></body></html>");
+  return page;
+}
+
+bool connectConfiguredWiFi(const BridgeConfig& candidate, bool keep_ap) {
+  WiFi.mode(keep_ap ? WIFI_AP_STA : WIFI_STA);
+  WiFi.begin(candidate.wifi_ssid.c_str(), candidate.wifi_password.c_str());
   Serial.print("Connecting to Wi-Fi");
-  while (WiFi.status() != WL_CONNECTED) {
+  const unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
     delay(500);
     Serial.print(".");
   }
   Serial.println();
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Wi-Fi connection failed.");
+    return false;
+  }
   Serial.print("ESP32 IP: ");
   Serial.println(WiFi.localIP());
+  return true;
+}
+
+bool connectConfiguredWiFiWithRetries() {
+  for (uint8_t attempt = 1; attempt <= WIFI_CONNECT_ATTEMPTS; attempt++) {
+    Serial.printf("Wi-Fi attempt %u of %u.\n", attempt, WIFI_CONNECT_ATTEMPTS);
+    if (connectConfiguredWiFi(config, false)) {
+      return true;
+    }
+    WiFi.disconnect(true);
+    delay(1000);
+  }
+  return false;
+}
+
+void handleSetupRoot() {
+  setup_server.send(200, "text/html", setupPage(""));
+}
+
+void handleSaveConfig() {
+  const BridgeConfig candidate = configFromRequest();
+  String error;
+  if (!saveConfig(candidate, error)) {
+    setup_server.send(400, "text/html", setupPage(error));
+    return;
+  }
+  setup_server.send(200, "text/html",
+                    setupPage("Configuration saved. ESP32 is restarting."));
+  delay(700);
+  ESP.restart();
+}
+
+void handleResetConfig() {
+  clearConfig();
+  setup_server.send(200, "text/plain", "Configuration cleared. Restarting...");
+  delay(700);
+  ESP.restart();
+}
+
+void handleTestConfig() {
+  const BridgeConfig candidate = configFromRequest();
+  String error;
+  if (!validateConfig(candidate, error)) {
+    setup_server.send(400, "text/plain", error);
+    return;
+  }
+
+  const BridgeConfig previous = config;
+  config = candidate;
+  if (!parseLocalKey()) {
+    config = previous;
+    setup_server.send(400, "text/plain", "Tuya local key is invalid.");
+    return;
+  }
+  if (!connectConfiguredWiFi(candidate, true)) {
+    WiFi.disconnect(false);
+    config = previous;
+    setup_server.send(408, "text/plain",
+                      "Wi-Fi connection failed. Check SSID and password.");
+    return;
+  }
+  const bool ok = tuyaStatus();
+  resetTuyaSession();
+  WiFi.disconnect(false);
+  WiFi.mode(WIFI_AP);
+  config = previous;
+  setup_server.send(ok ? 200 : 502, "text/plain",
+                    ok ? "Tuya connection test succeeded."
+                       : "Tuya connection test failed. Check IP, local key, protocol version, and LAN reachability.");
+}
+
+void startSetupMode(const String& reason, bool retry_saved_wifi = false) {
+  setup_mode = true;
+  setup_retry_saved_wifi = retry_saved_wifi;
+  last_setup_wifi_retry_ms = millis();
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_AP);
+  setup_ap_password = setupPasswordFromRandom();
+  const bool ap_started =
+      WiFi.softAP(SETUP_AP_SSID, setup_ap_password.c_str());
+  Serial.println();
+  Serial.println("Starting setup mode.");
+  if (!reason.isEmpty()) {
+    Serial.print("Reason: ");
+    Serial.println(reason);
+  }
+  if (!ap_started) {
+    Serial.println("Failed to start setup access point.");
+    return;
+  }
+  Serial.print("Setup AP SSID: ");
+  Serial.println(SETUP_AP_SSID);
+  Serial.print("Setup AP password: ");
+  Serial.println(setup_ap_password);
+  Serial.print("Setup URL: http://");
+  Serial.println(WiFi.softAPIP());
+
+  setup_server.on("/", HTTP_GET, handleSetupRoot);
+  setup_server.on("/save", HTTP_POST, handleSaveConfig);
+  setup_server.on("/reset", HTTP_POST, handleResetConfig);
+  setup_server.on("/test", HTTP_POST, handleTestConfig);
+  setup_server.onNotFound(handleSetupRoot);
+  setup_server.begin();
+}
+
+void maybeRetrySavedWiFiFromSetup() {
+  if (!setup_retry_saved_wifi ||
+      millis() - last_setup_wifi_retry_ms < SETUP_WIFI_RETRY_INTERVAL_MS) {
+    return;
+  }
+  last_setup_wifi_retry_ms = millis();
+  Serial.println("Retrying saved Wi-Fi from setup mode.");
+  if (!connectConfiguredWiFi(config, true)) {
+    WiFi.disconnect(false);
+    WiFi.mode(WIFI_AP);
+    Serial.println("Saved Wi-Fi still unavailable; setup mode remains active.");
+    return;
+  }
+  Serial.println("Saved Wi-Fi is available again; restarting normal mode.");
+  delay(500);
+  ESP.restart();
 }
 
 void syncTime() {
@@ -595,7 +1085,9 @@ struct HomeKitTuyaOutlet : Service::Outlet {
   }
 
   void loop() override {
-    if (millis() - last_poll_ms < 30000) {
+    const uint32_t poll_interval_ms =
+        normalizedPollInterval(config.poll_interval_seconds) * 1000;
+    if (millis() - last_poll_ms < poll_interval_ms) {
       return;
     }
     last_poll_ms = millis();
@@ -626,27 +1118,55 @@ void setup() {
   Serial.println();
   Serial.println("ESP32 HomeSpan Tuya Outlet");
 
-  if (!parseLocalKey()) {
-    Serial.println("Fix secrets.h before continuing.");
+  pinMode(RESET_CONFIG_PIN, INPUT_PULLUP);
+  if (digitalRead(RESET_CONFIG_PIN) == LOW) {
+    clearConfig();
+    startSetupMode("reset button held during boot");
     return;
   }
 
-  homeSpan.setWifiCredentials(WIFI_SSID, WIFI_PASSWORD);
+  if (!loadConfig()) {
+    startSetupMode("no saved configuration");
+    return;
+  }
+
+  if (!parseLocalKey()) {
+    startSetupMode("saved local key is invalid");
+    return;
+  }
+
+  if (!connectConfiguredWiFiWithRetries()) {
+    startSetupMode("Wi-Fi connection failed repeatedly", true);
+    return;
+  }
+
+  homeSpan.setWifiCredentials(config.wifi_ssid.c_str(),
+                              config.wifi_password.c_str());
   homeSpan.setLogLevel(1);
-  homeSpan.begin(Category::Outlets, HOMEKIT_ACCESSORY_NAME);
+  homeSpan.begin(Category::Outlets, config.homekit_accessory_name.c_str());
 
   new SpanAccessory();
   new Service::AccessoryInformation();
   new Characteristic::Identify();
-  new Characteristic::Name(HOMEKIT_ACCESSORY_NAME);
-  new Characteristic::Manufacturer(HOMEKIT_MANUFACTURER);
-  new Characteristic::Model(HOMEKIT_MODEL);
-  new Characteristic::SerialNumber(TUYA_DEVICE_ID);
+  new Characteristic::Name(config.homekit_accessory_name.c_str());
+  new Characteristic::Manufacturer(config.homekit_manufacturer.c_str());
+  new Characteristic::Model(config.homekit_model.c_str());
+  new Characteristic::SerialNumber(config.tuya_device_id.c_str());
   new Characteristic::FirmwareRevision("0.2.0");
   new HomeKitTuyaOutlet();
+  homekit_started = true;
 }
 
 void loop() {
+  if (setup_mode) {
+    setup_server.handleClient();
+    maybeRetrySavedWiFiFromSetup();
+    return;
+  }
+  if (!homekit_started) {
+    delay(100);
+    return;
+  }
   static bool time_sync_started = false;
   if (!time_sync_started && WiFi.status() == WL_CONNECTED) {
     time_sync_started = true;
