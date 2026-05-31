@@ -279,6 +279,21 @@ Fill the setup form:
 - HomeKit pairing code: your own 8-digit code, or blank for HomeSpan default `466-37-726`
 - polling interval: `30`
 
+The v2.1 setup page is split into steps:
+
+1. Wi-Fi setup
+2. Find Tuya device
+3. Enter Tuya credentials
+4. Test connection
+5. HomeKit settings
+6. Save and reboot
+
+The **Find Tuya devices** button is experimental. It looks for devices with Tuya-like local ports open on the same network. If it finds something, use **Use this IP**, then still enter the correct Device ID and `local_key`.
+
+The **Test Tuya connection** button gives more detail than just success or failure. It can show whether the IP and port are reachable, whether the local key/protocol look wrong, whether the relay DPS was found, and how long the response took.
+
+The **Scan DPS** button is read-only. It lists Tuya datapoints returned by the plug. If you see a boolean datapoint that clearly follows the plug on/off state, you can use it as the relay DPS. The scanner does not turn unknown datapoints on or off.
+
 The setup page uses plain HTTP on the temporary ESP32 setup network. Stay near the ESP32 while configuring it and save valid settings so setup mode turns off. Wi-Fi passwords and Tuya local keys are stored in ESP32 Preferences in plaintext, so use an IoT or guest Wi-Fi network if possible. If you open setup mode later, saved Wi-Fi passwords and Tuya local keys are not displayed; leave those fields blank to keep the saved values.
 
 Use **Test Tuya connection** if you want to verify the values before saving.
@@ -295,7 +310,16 @@ When the ESP32 starts normally, Serial Monitor prints an admin URL like:
 Admin URL: http://192.168.1.50:8080
 ```
 
-Open that address from the same Wi-Fi network if you need to edit saved settings later. The admin page can also clear HomeKit pairing on the ESP32. It is plain local HTTP without login, so use it only on a trusted LAN or IoT network.
+Open that address from the same Wi-Fi network if you need to edit saved settings later. The admin dashboard can test Tuya connection, scan DPS values, restart the ESP32, clear bridge configuration, and clear HomeKit pairing on the ESP32.
+
+The dashboard also shows current HomeKit, Tuya and network status:
+
+- HomeKit name, type, relay state and polling interval
+- Tuya IP, protocol, relay DPS, last response, latency and failed poll count
+- Wi-Fi SSID, ESP32 IP, signal strength, uptime and free heap
+- a small diagnostics log with recent Wi-Fi, HomeSpan and Tuya events
+
+The admin page is plain local HTTP without login, so use it only on a trusted LAN or IoT network. Do not expose it to the internet.
 
 Reset options:
 

@@ -26,6 +26,15 @@ http://192.168.4.1/
 
 The setup Wi-Fi password is randomly generated for each setup session and printed in Serial Monitor.
 
+The v2.1 setup page is a lightweight step-based wizard:
+
+1. Wi-Fi setup
+2. Find Tuya device
+3. Enter Tuya credentials
+4. Test connection
+5. HomeKit settings
+6. Save and reboot
+
 The setup page stores these values in ESP32 flash using `Preferences`:
 
 - Wi-Fi SSID
@@ -42,11 +51,24 @@ The setup page stores these values in ESP32 flash using `Preferences`:
 
 The setup page uses plain HTTP on the temporary ESP32 setup network. Configure it near the ESP32 and do not leave setup mode running longer than needed. Saved Wi-Fi passwords and Tuya local keys are stored in ESP32 Preferences in plaintext, but they are not shown back in the form; leave those fields blank to keep existing saved values when reconfiguring. Use an IoT or guest Wi-Fi network if possible.
 
-Use **Test Tuya connection** before saving if you want to verify the values from the ESP32.
+Use **Test Tuya connection** before saving if you want structured diagnostics from the ESP32. The result shows whether the IP/port is reachable, which protocol version is used, whether authentication looks valid, whether the configured relay DPS was found, current relay state if available, response latency, and practical suggestions.
+
+The **Find Tuya devices** button is experimental. It scans the ESP32 local subnet for open Tuya-like TCP ports `6668` and `6669`, then labels results as `possible Tuya device` or `likely Tuya device`. It cannot prove that a device is Tuya and it cannot discover the `local_key`.
+
+The **Scan DPS** button is also experimental and read-only. It queries the status payload, lists returned Tuya datapoints, labels obvious boolean values as possible relay/switch candidates, and lets you copy a boolean datapoint into the relay DPS field. It does not toggle unknown datapoints.
 
 After **Save and restart**, the ESP32 loads the saved configuration, connects to Wi-Fi, starts HomeSpan, and exposes the plug as a HomeKit outlet.
 
-After normal boot, Serial Monitor prints an admin URL with the ESP32's LAN IP address and port `8080`. Open that URL from the same Wi-Fi network to edit saved settings, test Tuya connectivity, clear bridge configuration, or clear HomeKit pairing on the ESP32. The admin page is plain local HTTP without login, so use it only on a trusted LAN or IoT network.
+After normal boot, Serial Monitor prints an admin URL with the ESP32's LAN IP address and port `8080`. Open that URL from the same Wi-Fi network to edit saved settings, test Tuya connectivity, inspect DPS values, restart the ESP32, clear bridge configuration, or clear HomeKit pairing on the ESP32.
+
+The admin dashboard shows:
+
+- HomeKit accessory name, type, relay state and polling interval
+- Tuya IP, protocol version, relay DPS, last response status, last latency and failed poll count
+- Wi-Fi SSID, ESP32 IP, RSSI, uptime and free heap
+- recent diagnostics events from a small in-memory log
+
+The admin page is plain local HTTP without login, so use it only on a trusted LAN or IoT network. Do not expose it to the internet.
 
 If Wi-Fi connection fails repeatedly during boot, the sketch falls back to setup mode and periodically retries the saved Wi-Fi. If the network comes back, the ESP32 restarts into normal HomeSpan mode.
 

@@ -34,15 +34,106 @@ For maintainers preparing a GitHub release, use:
 
 ## Current Status
 
-Current development branch for the next version:
+Current development branch: `v2.1 Smart Setup & Diagnostics`.
 
 - tested with one Tesla Smart Plug / Tuya protocol `3.4`
 - local Python control works through TinyTuya
 - ESP32 local Tuya POC works for `status`, `on`, and `off`
-- HomeSpan sketch exposes the plug as an Apple HomeKit `Outlet`
-- HomeSpan sketch has a first setup web wizard, so users no longer need to edit source code for normal setup
+- HomeSpan sketch exposes one Tuya relay as a HomeKit `Outlet`, `Light`, or `Switch`
+- HomeSpan sketch has a step-based setup web wizard, so users no longer need to edit source code for normal setup
+- admin dashboard shows HomeKit, Tuya, network and diagnostics status after the ESP32 joins Wi-Fi
+- experimental LAN scan and read-only DPS inspector are available from the web UI
 
 This is still experimental. Treat the project as a working reference build for one known device, not as a universal Tuya bridge.
+
+## Compatibility
+
+| Device | Brand | Protocol | Relay DPS | Status | Notes |
+| ------ | ----- | -------: | --------: | ------ | ----- |
+| Tesla Smart Plug | Tesla | `3.4` | `1` | Working | Verified by author with local Tuya LAN control |
+
+Please open an issue if you verify another device. Do not include local keys, Wi-Fi passwords, Tuya Access Secret values, or unredacted API responses.
+
+## Web Setup and Dashboard
+
+The recommended firmware is:
+
+```text
+esp32/homespan_tuya_outlet/homespan_tuya_outlet.ino
+```
+
+On first boot, the ESP32 starts a setup access point:
+
+```text
+TuyaHomeKit-Setup
+```
+
+Open:
+
+```text
+http://192.168.4.1/
+```
+
+The v2.1 wizard is step-based:
+
+1. Wi-Fi setup
+2. Find Tuya device
+3. Enter Tuya credentials
+4. Test connection
+5. HomeKit settings
+6. Save and reboot
+
+The wizard still supports manual entry for Wi-Fi SSID/password, Tuya IP, device ID, local key, protocol version, relay DPS, HomeKit name/type/pairing code, and polling interval.
+
+After normal boot, Serial Monitor prints a local admin URL, for example:
+
+```text
+Admin URL: http://192.168.1.50:8080
+```
+
+The dashboard shows:
+
+- HomeKit accessory name, type, relay state and polling interval
+- Tuya IP, protocol version, relay DPS, last status, latency and failed poll count
+- Wi-Fi SSID, ESP32 IP address, RSSI, uptime and free heap
+- recent in-memory diagnostics events
+
+Available dashboard actions:
+
+- Test Tuya connection
+- Scan DPS
+- Restart ESP32
+- Reset configuration
+- Reset HomeKit pairing
+
+### Experimental LAN Scan
+
+The **Find Tuya devices** button scans the ESP32's local subnet for candidates with common Tuya LAN ports open, especially `6668` and `6669`.
+
+Results are intentionally labelled as `possible Tuya device` or `likely Tuya device`. An open port is not proof that the device is Tuya. If a candidate looks right, use **Use this IP** and then run **Test Tuya connection** with the correct device ID and local key.
+
+LAN scan limitations:
+
+- ESP32 and plug must be on the same subnet/VLAN
+- some routers or IoT networks block local client-to-client traffic
+- scan timeouts are short, so slow devices may be missed
+- this does not discover the local key
+
+### Experimental DPS Inspector
+
+The **Scan DPS** button queries the Tuya status payload and displays returned datapoints.
+
+This v2.1 inspector is read-only. It does not toggle unknown datapoints. Boolean values are labelled as possible relay/switch candidates, and numeric values are labelled as possible sensor/energy/power values.
+
+Use **Use as relay DPS** only when the boolean datapoint clearly represents the relay state.
+
+## Security Note
+
+- The setup and admin pages currently have no authentication.
+- Use them only on a trusted LAN, guest network, or IoT network.
+- Do not expose the ESP32 dashboard to the internet.
+- Wi-Fi password and Tuya local key are stored in ESP32 flash memory.
+- The web UI does not show saved Wi-Fi passwords or local keys back in the form; leave those fields blank to keep saved values when editing.
 
 ## Visual Overview
 
@@ -457,6 +548,15 @@ For long-term use:
 The biggest unknown is Tuya firmware behavior. A future plug firmware update could change local protocol behavior.
 
 ## Troubleshooting
+
+| Problem | Possible cause | Fix |
+| ------- | -------------- | --- |
+| Device found but connection test fails | Wrong local key | Verify `local_key` with TinyTuya or Tuya IoT Platform |
+| No Tuya device found | Device on another VLAN/subnet | Put ESP32 and plug on the same LAN, or enter the IP manually |
+| Port is open but test still fails | Wrong protocol version or local key | Keep protocol `3.4` for the verified plug and re-check credentials |
+| Relay DPS not found | Plug uses a different datapoint | Use **Scan DPS** and choose the correct boolean DPS |
+| HomeKit state updates slowly | Polling interval is high | Lower polling interval if your network and plug tolerate it |
+| Admin page is unreachable | ESP32 IP changed | Check Serial Monitor or reserve the ESP32 IP in your router |
 
 ### TinyTuya finds the device but status fails
 

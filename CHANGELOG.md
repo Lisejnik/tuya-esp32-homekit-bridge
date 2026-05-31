@@ -2,7 +2,13 @@
 
 ## Unreleased
 
-- Nothing yet.
+- Start v2.1 Smart Setup & Diagnostics development.
+- Modernize setup into a mobile-friendly step-based wizard.
+- Add experimental LAN scan for possible Tuya devices on ports `6668` and `6669`.
+- Add structured Tuya connection diagnostics with latency, port, authentication, relay DPS and suggestion details.
+- Add experimental read-only DPS inspector with boolean relay-candidate selection.
+- Add admin dashboard metrics and an in-memory diagnostics log.
+- Update docs for v2.1 setup, dashboard, diagnostics, security, compatibility and troubleshooting.
 
 ## v2.0 - ESP32 Web Setup Wizard
 

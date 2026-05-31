@@ -14,6 +14,7 @@
 namespace {
 
 constexpr uint16_t TUYA_PORT = 6668;
+constexpr uint16_t TUYA_ALT_PORT = 6669;
 constexpr uint16_t ADMIN_PORT = 8080;
 constexpr char SETUP_AP_SSID[] = "TuyaHomeKit-Setup";
 constexpr char SETUP_AP_PASSWORD_PREFIX[] = "THK";
@@ -44,6 +45,9 @@ constexpr uint8_t CMD_DP_QUERY_NEW = 0x10;
 constexpr size_t AES_BLOCK_SIZE = 16;
 constexpr size_t HMAC_SIZE = 32;
 constexpr uint32_t DEFAULT_POLL_INTERVAL_SECONDS = 30;
+constexpr size_t DIAGNOSTIC_LOG_SIZE = 16;
+constexpr uint8_t LAN_SCAN_MAX_RESULTS = 16;
+constexpr uint16_t LAN_SCAN_CONNECT_TIMEOUT_MS = 35;
 
 const uint8_t LOCAL_NONCE[AES_BLOCK_SIZE] = {
     '0', '1', '2', '3', '4', '5', '6', '7',
@@ -74,6 +78,37 @@ struct TuyaResponse {
   bool hmac_ok = false;
 };
 
+struct DpsEntry {
+  String key;
+  String value;
+  String label;
+  bool is_boolean = false;
+};
+
+struct TuyaDiagnostics {
+  bool ip_reachable = false;
+  bool port_6668_open = false;
+  bool port_6669_open = false;
+  bool auth_ok = false;
+  bool relay_dps_found = false;
+  bool relay_state_known = false;
+  bool relay_state = false;
+  uint32_t latency_ms = 0;
+  String protocol_version;
+  String payload_json;
+  String error;
+  String suggestions;
+};
+
+struct RuntimeStatus {
+  bool relay_state_known = false;
+  bool relay_state = false;
+  String last_tuya_status = "Not tested yet";
+  uint32_t last_latency_ms = 0;
+  uint32_t failed_poll_count = 0;
+  uint32_t successful_poll_count = 0;
+};
+
 BridgeConfig config;
 Preferences preferences;
 WebServer setup_server(80);
@@ -100,6 +135,23 @@ uint8_t sos_step = 0;
 bool sos_led_on = false;
 
 String setup_ap_password;
+RuntimeStatus runtime_status;
+String diagnostic_log[DIAGNOSTIC_LOG_SIZE];
+uint8_t diagnostic_log_start = 0;
+uint8_t diagnostic_log_count = 0;
+
+bool connectConfiguredWiFi(const BridgeConfig& candidate, bool keep_ap);
+
+void addDiagnosticLog(const String& event) {
+  const uint8_t index =
+      (diagnostic_log_start + diagnostic_log_count) % DIAGNOSTIC_LOG_SIZE;
+  diagnostic_log[index] = String(millis() / 1000) + "s: " + event;
+  if (diagnostic_log_count < DIAGNOSTIC_LOG_SIZE) {
+    diagnostic_log_count++;
+    return;
+  }
+  diagnostic_log_start = (diagnostic_log_start + 1) % DIAGNOSTIC_LOG_SIZE;
+}
 
 void writeStatusLedDuty(uint8_t duty) {
   if (STATUS_LED_ON == HIGH) {
@@ -334,6 +386,53 @@ String htmlEscape(const String& value) {
     }
   }
   return escaped;
+}
+
+String yesNo(bool value) {
+  return value ? "yes" : "no";
+}
+
+String onOff(bool value) {
+  return value ? "on" : "off";
+}
+
+String homeKitServiceLabel() {
+  if (config.homekit_service_type == "light") {
+    return "Light";
+  }
+  if (config.homekit_service_type == "switch") {
+    return "Switch";
+  }
+  return "Outlet";
+}
+
+String formatDuration(unsigned long seconds) {
+  const unsigned long days = seconds / 86400;
+  seconds %= 86400;
+  const unsigned long hours = seconds / 3600;
+  seconds %= 3600;
+  const unsigned long minutes = seconds / 60;
+  seconds %= 60;
+  String out;
+  if (days > 0) {
+    out += String(days) + "d ";
+  }
+  if (hours > 0 || !out.isEmpty()) {
+    out += String(hours) + "h ";
+  }
+  if (minutes > 0 || !out.isEmpty()) {
+    out += String(minutes) + "m ";
+  }
+  out += String(seconds) + "s";
+  return out;
+}
+
+void addMetricRow(String& page, const String& label, const String& value) {
+  page += F("<tr><th>");
+  page += htmlEscape(label);
+  page += F("</th><td>");
+  page += htmlEscape(value);
+  page += F("</td></tr>");
 }
 
 bool parseTuyaIp(IPAddress& ip) {
@@ -652,7 +751,7 @@ bool parseLocalKey() {
   return true;
 }
 
-bool connectTuya() {
+bool connectTuyaPort(uint16_t port, uint32_t timeout_ms) {
   if (client.connected()) {
     return true;
   }
@@ -666,13 +765,30 @@ bool connectTuya() {
   Serial.print("Connecting to Tuya plug ");
   Serial.print(tuya_ip);
   Serial.print(":");
-  Serial.println(TUYA_PORT);
-  if (!client.connect(tuya_ip, TUYA_PORT, 5000)) {
+  Serial.println(port);
+  if (!client.connect(tuya_ip, port, timeout_ms)) {
     Serial.println("TCP connection failed.");
     return false;
   }
   client.setTimeout(5000);
   return true;
+}
+
+bool connectTuya() {
+  return connectTuyaPort(TUYA_PORT, 5000);
+}
+
+bool testTcpPort(const IPAddress& ip, uint16_t port, uint32_t timeout_ms,
+                 uint32_t* latency_ms) {
+  WiFiClient probe;
+  const unsigned long start = millis();
+  const bool connected = probe.connect(ip, port, timeout_ms);
+  const uint32_t elapsed = uint32_t(millis() - start);
+  probe.stop();
+  if (latency_ms) {
+    *latency_ms = elapsed;
+  }
+  return connected;
 }
 
 bool readExact(uint8_t* data, size_t length) {
@@ -900,9 +1016,125 @@ void printClearPayload(const std::vector<uint8_t>& payload) {
   Serial.println(text);
 }
 
-bool tuyaStatus() {
+bool parseRelayStateFromText(String text, const String& dps, bool& is_on) {
+  String true_pattern = String("\"") + dps + "\":true";
+  String false_pattern = String("\"") + dps + "\":false";
+  text.replace(" ", "");
+  if (text.indexOf(true_pattern) >= 0) {
+    is_on = true;
+    return true;
+  }
+  if (text.indexOf(false_pattern) >= 0) {
+    is_on = false;
+    return true;
+  }
+  return false;
+}
+
+String dpsHeuristicLabel(const String& value, bool is_boolean) {
+  if (is_boolean) {
+    return "boolean value; possible relay/switch candidate";
+  }
+  bool numeric = !value.isEmpty();
+  for (size_t i = 0; i < value.length(); i++) {
+    const char ch = value.charAt(i);
+    if (!isDigit(ch) && ch != '-' && ch != '.') {
+      numeric = false;
+      break;
+    }
+  }
+  if (numeric) {
+    return "numeric value; possible sensor/energy/power value";
+  }
+  return "unknown value type";
+}
+
+std::vector<DpsEntry> parseDpsEntries(const String& payload) {
+  std::vector<DpsEntry> entries;
+  int dps_pos = payload.indexOf("\"dps\"");
+  if (dps_pos < 0) {
+    dps_pos = payload.indexOf("'dps'");
+  }
+  if (dps_pos < 0) {
+    return entries;
+  }
+  int object_start = payload.indexOf('{', dps_pos);
+  if (object_start < 0) {
+    return entries;
+  }
+  int i = object_start + 1;
+  while (i < payload.length()) {
+    while (i < payload.length() &&
+           (payload.charAt(i) == ' ' || payload.charAt(i) == ',' ||
+            payload.charAt(i) == '\n' || payload.charAt(i) == '\r')) {
+      i++;
+    }
+    if (i >= payload.length() || payload.charAt(i) == '}') {
+      break;
+    }
+    if (payload.charAt(i) != '"' && payload.charAt(i) != '\'') {
+      i++;
+      continue;
+    }
+    const char quote = payload.charAt(i++);
+    const int key_start = i;
+    while (i < payload.length() && payload.charAt(i) != quote) {
+      i++;
+    }
+    if (i >= payload.length()) {
+      break;
+    }
+    DpsEntry entry;
+    entry.key = payload.substring(key_start, i++);
+    while (i < payload.length() &&
+           (payload.charAt(i) == ' ' || payload.charAt(i) == ':')) {
+      i++;
+    }
+    const int value_start = i;
+    int depth = 0;
+    bool in_string = false;
+    char string_quote = 0;
+    while (i < payload.length()) {
+      const char ch = payload.charAt(i);
+      if (in_string) {
+        if (ch == string_quote && payload.charAt(i - 1) != '\\') {
+          in_string = false;
+        }
+      } else if (ch == '"' || ch == '\'') {
+        in_string = true;
+        string_quote = ch;
+      } else if (ch == '{' || ch == '[') {
+        depth++;
+      } else if (ch == '}' || ch == ']') {
+        if (depth == 0) {
+          break;
+        }
+        depth--;
+      } else if (ch == ',' && depth == 0) {
+        break;
+      }
+      i++;
+    }
+    entry.value = payload.substring(value_start, i);
+    entry.value.trim();
+    entry.is_boolean = entry.value == "true" || entry.value == "false";
+    entry.label = dpsHeuristicLabel(entry.value, entry.is_boolean);
+    entries.push_back(entry);
+    if (i < payload.length() && payload.charAt(i) == '}') {
+      break;
+    }
+  }
+  return entries;
+}
+
+bool tuyaQueryStatusPayload(String& payload_json, uint32_t* latency_ms,
+                            String* error) {
+  const unsigned long start = millis();
   if (!ensureSession()) {
     setTuyaError(true);
+    if (error) {
+      *error = "Could not negotiate Tuya session. Check IP, local key, and protocol version.";
+    }
     return false;
   }
   const char payload[] = "{}";
@@ -912,6 +1144,9 @@ bool tuyaStatus() {
     Serial.println("Status command failed.");
     resetTuyaSession();
     setTuyaError(true);
+    if (error) {
+      *error = "Status command failed or timed out.";
+    }
     return false;
   }
   std::vector<uint8_t> clear;
@@ -919,57 +1154,66 @@ bool tuyaStatus() {
     Serial.println("Could not decrypt status response.");
     resetTuyaSession();
     setTuyaError(true);
+    if (error) {
+      *error = "Status response could not be decrypted. The local key or protocol version may be wrong.";
+    }
     return false;
   }
-  printClearPayload(clear);
+  payload_json = payloadJsonText(clear);
+  if (latency_ms) {
+    *latency_ms = uint32_t(millis() - start);
+  }
   resetTuyaSession();
   setTuyaError(false);
   return true;
 }
 
+bool tuyaStatus() {
+  String payload_json;
+  uint32_t latency_ms = 0;
+  String error;
+  if (!tuyaQueryStatusPayload(payload_json, &latency_ms, &error)) {
+    runtime_status.last_tuya_status = error;
+    runtime_status.failed_poll_count++;
+    addDiagnosticLog("Tuya poll failed: " + error);
+    return false;
+  }
+  Serial.println("Tuya clear payload:");
+  Serial.println(payload_json);
+  runtime_status.last_tuya_status = "OK";
+  runtime_status.last_latency_ms = latency_ms;
+  runtime_status.successful_poll_count++;
+  addDiagnosticLog("Tuya poll OK");
+  return true;
+}
+
 bool tuyaReadPower(bool& is_on) {
-  if (!ensureSession()) {
-    setTuyaError(true);
-    return false;
-  }
-  const char payload[] = "{}";
-  TuyaResponse response;
-  if (!sendEncrypted(CMD_DP_QUERY_NEW, reinterpret_cast<const uint8_t*>(payload),
-                     strlen(payload), session_key, false, &response)) {
-    Serial.println("Status command failed.");
-    resetTuyaSession();
-    setTuyaError(true);
+  String payload_json;
+  uint32_t latency_ms = 0;
+  String error;
+  if (!tuyaQueryStatusPayload(payload_json, &latency_ms, &error)) {
+    runtime_status.last_tuya_status = error;
+    runtime_status.failed_poll_count++;
+    addDiagnosticLog("Tuya poll failed: " + error);
     return false;
   }
 
-  std::vector<uint8_t> clear;
-  if (!decryptPayload(session_key, response, clear)) {
-    Serial.println("Could not decrypt status response.");
-    resetTuyaSession();
-    setTuyaError(true);
-    return false;
-  }
-
-  String text = payloadJsonText(clear);
-  String true_pattern = String("\"") + config.tuya_relay_dps + "\":true";
-  String false_pattern = String("\"") + config.tuya_relay_dps + "\":false";
-  text.replace(" ", "");
-  if (text.indexOf(true_pattern) >= 0) {
-    is_on = true;
-    resetTuyaSession();
-    setTuyaError(false);
-    return true;
-  }
-  if (text.indexOf(false_pattern) >= 0) {
-    is_on = false;
-    resetTuyaSession();
-    setTuyaError(false);
+  if (parseRelayStateFromText(payload_json, config.tuya_relay_dps, is_on)) {
+    runtime_status.last_tuya_status = "OK";
+    runtime_status.last_latency_ms = latency_ms;
+    runtime_status.relay_state_known = true;
+    runtime_status.relay_state = is_on;
+    runtime_status.successful_poll_count++;
+    addDiagnosticLog(String("Tuya poll OK; relay ") + onOff(is_on));
     return true;
   }
 
   Serial.println("Relay DPS was not found in status response.");
-  printClearPayload(clear);
-  resetTuyaSession();
+  Serial.println(payload_json);
+  runtime_status.last_tuya_status = "Relay DPS not found in status response";
+  runtime_status.failed_poll_count++;
+  runtime_status.relay_state_known = false;
+  addDiagnosticLog("Tuya poll failed: relay DPS not found");
   setTuyaError(true);
   return false;
 }
@@ -1019,40 +1263,272 @@ bool tuyaSwitch(bool on) {
   }
   resetTuyaSession();
   setTuyaError(false);
+  runtime_status.relay_state_known = true;
+  runtime_status.relay_state = on;
+  runtime_status.last_tuya_status = "Switch command OK";
+  addDiagnosticLog(String("Tuya switch command OK; relay ") + onOff(on));
   return true;
+}
+
+TuyaDiagnostics runTuyaDiagnostics() {
+  TuyaDiagnostics diagnostics;
+  diagnostics.protocol_version = config.tuya_protocol_version;
+
+  IPAddress tuya_ip;
+  if (!parseTuyaIp(tuya_ip)) {
+    diagnostics.error = "Tuya IP address is invalid.";
+    diagnostics.suggestions = "Enter the plug IP address from your router.";
+    return diagnostics;
+  }
+
+  uint32_t port_latency = 0;
+  diagnostics.port_6668_open =
+      testTcpPort(tuya_ip, TUYA_PORT, 900, &port_latency);
+  diagnostics.port_6669_open =
+      testTcpPort(tuya_ip, TUYA_ALT_PORT, 500, nullptr);
+  diagnostics.ip_reachable =
+      diagnostics.port_6668_open || diagnostics.port_6669_open;
+  if (!diagnostics.port_6668_open) {
+    diagnostics.latency_ms = port_latency;
+    diagnostics.error = diagnostics.port_6669_open
+                            ? "Port 6669 is open, but this firmware currently talks on 6668."
+                            : "No Tuya LAN port responded.";
+    diagnostics.suggestions =
+        "Check that the device is online, on the same LAN/VLAN, and that the IP address is correct.";
+    return diagnostics;
+  }
+
+  String error;
+  if (!tuyaQueryStatusPayload(diagnostics.payload_json, &diagnostics.latency_ms,
+                              &error)) {
+    diagnostics.error = error;
+    diagnostics.suggestions =
+        "If the IP and LAN are correct, verify the local key, protocol version, and device ID.";
+    return diagnostics;
+  }
+
+  diagnostics.auth_ok = true;
+  diagnostics.relay_dps_found = parseRelayStateFromText(
+      diagnostics.payload_json, config.tuya_relay_dps, diagnostics.relay_state);
+  diagnostics.relay_state_known = diagnostics.relay_dps_found;
+  if (!diagnostics.relay_dps_found) {
+    diagnostics.error = "Connection works, but configured relay DPS was not found.";
+    diagnostics.suggestions =
+        "Run Scan DPS and choose a boolean datapoint that represents the relay/switch.";
+    return diagnostics;
+  }
+
+  diagnostics.error = "OK";
+  diagnostics.suggestions = "No action needed.";
+  return diagnostics;
+}
+
+String diagnosticsHtml(const TuyaDiagnostics& diagnostics) {
+  String html;
+  html.reserve(3000);
+  html += F("<div class=\"result-card\"><h3>Tuya connection diagnostics</h3><table>");
+  addMetricRow(html, "IP reachable", yesNo(diagnostics.ip_reachable));
+  addMetricRow(html, "Tuya port 6668 open", yesNo(diagnostics.port_6668_open));
+  addMetricRow(html, "Tuya port 6669 open", yesNo(diagnostics.port_6669_open));
+  addMetricRow(html, "Protocol version used", diagnostics.protocol_version);
+  addMetricRow(html, "Authentication/local key", diagnostics.auth_ok ? "OK" : "failed or not confirmed");
+  addMetricRow(html, "Relay DPS found", yesNo(diagnostics.relay_dps_found));
+  addMetricRow(html, "Current relay state",
+               diagnostics.relay_state_known ? onOff(diagnostics.relay_state) : "unknown");
+  addMetricRow(html, "Response latency", String(diagnostics.latency_ms) + " ms");
+  addMetricRow(html, "Summary", diagnostics.error);
+  html += F("</table><p class=\"help\"><strong>Suggestion:</strong> ");
+  html += htmlEscape(diagnostics.suggestions);
+  html += F("</p></div>");
+  return html;
+}
+
+String dpsInspectorHtml(const String& payload_json) {
+  const std::vector<DpsEntry> entries = parseDpsEntries(payload_json);
+  String html;
+  html.reserve(5000);
+  html += F("<div class=\"result-card\"><h3>Experimental DPS inspector</h3>");
+  html += F("<p class=\"help\">Read-only scan. It does not toggle unknown datapoints.</p>");
+  if (entries.empty()) {
+    html += F("<p>No DPS values were found in the response.</p></div>");
+    return html;
+  }
+  html += F("<table><tr><th>DPS</th><th>Value</th><th>Heuristic label</th><th>Action</th></tr>");
+  for (const DpsEntry& entry : entries) {
+    html += F("<tr><td>");
+    html += htmlEscape(entry.key);
+    html += F("</td><td><code>");
+    html += htmlEscape(entry.value);
+    html += F("</code></td><td>");
+    html += htmlEscape(entry.label);
+    html += F("</td><td>");
+    if (entry.is_boolean) {
+      html += F("<button type=\"button\" class=\"small\" onclick=\"useDps('");
+      html += htmlEscape(entry.key);
+      html += F("')\">Use as relay DPS</button>");
+    } else {
+      html += F("<span class=\"muted\">read only</span>");
+    }
+    html += F("</td></tr>");
+  }
+  html += F("</table></div>");
+  return html;
+}
+
+String lanScanHtml(const BridgeConfig& candidate) {
+  String html;
+  html.reserve(6000);
+  const bool already_on_wifi = WiFi.status() == WL_CONNECTED;
+  if (!already_on_wifi && candidate.wifi_ssid.isEmpty()) {
+    return F("<div class=\"result-card error\">Enter Wi-Fi SSID first. The ESP32 must join the LAN before it can scan it.</div>");
+  }
+
+  if (!already_on_wifi && !connectConfiguredWiFi(candidate, true)) {
+    WiFi.disconnect(false);
+    WiFi.mode(WIFI_AP);
+    return F("<div class=\"result-card error\">Wi-Fi connection failed. Check SSID/password before scanning.</div>");
+  }
+
+  IPAddress local_ip = WiFi.localIP();
+  IPAddress gateway = WiFi.gatewayIP();
+  IPAddress probe_ip(local_ip[0], local_ip[1], local_ip[2], 1);
+  uint8_t found = 0;
+  html += F("<div class=\"result-card\"><h3>Experimental LAN scan</h3>");
+  html += F("<p class=\"help\">Results are candidates only. Tuya detection cannot be guaranteed from an open TCP port alone.</p>");
+  html += F("<table><tr><th>IP address</th><th>Open port</th><th>Label</th><th>Action</th></tr>");
+
+  for (uint16_t host = 1; host <= 254 && found < LAN_SCAN_MAX_RESULTS; host++) {
+    probe_ip[3] = uint8_t(host);
+    if (probe_ip == local_ip || probe_ip == gateway) {
+      continue;
+    }
+    uint32_t latency_ms = 0;
+    bool open = testTcpPort(probe_ip, TUYA_PORT, LAN_SCAN_CONNECT_TIMEOUT_MS,
+                            &latency_ms);
+    uint16_t open_port = TUYA_PORT;
+    String label = "likely Tuya device";
+    if (!open) {
+      open = testTcpPort(probe_ip, TUYA_ALT_PORT, LAN_SCAN_CONNECT_TIMEOUT_MS,
+                         &latency_ms);
+      open_port = TUYA_ALT_PORT;
+      label = "possible Tuya device";
+    }
+    if (!open) {
+      continue;
+    }
+    found++;
+    html += F("<tr><td>");
+    html += probe_ip.toString();
+    html += F("</td><td>");
+    html += String(open_port);
+    html += F("</td><td>");
+    html += label;
+    html += F(" (");
+    html += String(latency_ms);
+    html += F(" ms)</td><td><button type=\"button\" class=\"small\" onclick=\"useIp('");
+    html += probe_ip.toString();
+    html += F("')\">Use this IP</button></td></tr>");
+  }
+  if (found == 0) {
+    html += F("<tr><td colspan=\"4\">No candidates found. The plug may be offline, on another subnet/VLAN, or blocking Tuya LAN ports.</td></tr>");
+  }
+  html += F("</table></div>");
+
+  if (!already_on_wifi) {
+    WiFi.disconnect(false);
+    WiFi.mode(WIFI_AP);
+  }
+  addDiagnosticLog(String("LAN scan finished; candidates found: ") + found);
+  return html;
 }
 
 String setupPage(const String& message) {
   String page;
-  page.reserve(14000);
+  page.reserve(30000);
   page += F("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
   page += F("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-  page += F("<title>Tuya HomeKit Setup</title><style>");
-  page += F(":root{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#14212b;background:#f6f8fa}");
-  page += F("body{margin:0;padding:24px}.wrap{max-width:760px;margin:0 auto;background:white;border:1px solid #d8dee4;border-radius:8px;padding:24px}");
-  page += F("h1{margin:0 0 8px;font-size:28px}.hint,.help{color:#57606a;margin-top:0}.help{font-size:13px;line-height:1.35}");
-  page += F(".grid{display:grid;gap:14px}label{display:grid;gap:6px;font-weight:600}");
-  page += F("input,select{font:inherit;padding:10px;border:1px solid #d0d7de;border-radius:6px;background:white}");
-  page += F("button{font:inherit;border:0;border-radius:6px;padding:10px 14px;background:#008b8b;color:white;font-weight:700;cursor:pointer}");
-  page += F("button.secondary{background:#24292f}button.danger{background:#b42318}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}");
-  page += F(".msg{margin:16px 0;padding:12px;border-radius:6px;background:#ddf4ff;border:1px solid #54aeef}.foot{margin-top:18px;color:#57606a;font-size:14px}");
-  page += F(".box{margin-top:18px;padding:12px;border:1px solid #d8dee4;border-radius:6px;background:#f6f8fa}.box h2{font-size:16px;margin:0 0 8px}");
-  page += F("</style></head><body><main class=\"wrap\"><h1>Tuya HomeKit Setup</h1>");
-  page += F("<p class=\"hint\">Enter the local Tuya plug values. Secrets are stored only in ESP32 flash memory and are not shown back after saving. This local page has no login, so use it only on a trusted network.</p>");
+  page += F("<title>Tuya HomeKit Bridge</title><style>");
+  page += F(":root{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#14212b;background:#f6f8fa;line-height:1.45}");
+  page += F("body{margin:0;padding:18px}.wrap{max-width:980px;margin:0 auto}.panel{background:white;border:1px solid #d8dee4;border-radius:8px;padding:20px;margin:0 0 16px}");
+  page += F("h1{margin:0 0 6px;font-size:28px}h2{font-size:18px;margin:0 0 12px}h3{font-size:16px;margin:0 0 10px}.hint,.help,.muted{color:#57606a;margin-top:0}.help{font-size:13px;line-height:1.35}");
+  page += F(".steps{display:flex;gap:8px;overflow:auto;margin:16px 0}.step-dot{border:1px solid #d0d7de;background:#fff;color:#24292f;border-radius:999px;padding:8px 10px;white-space:nowrap;font-size:13px}.step-dot.active{background:#008b8b;color:white;border-color:#008b8b}");
+  page += F(".step{display:none}.step.active{display:block}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}label{display:grid;gap:6px;font-weight:600}");
+  page += F("input,select{font:inherit;padding:10px;border:1px solid #d0d7de;border-radius:6px;background:white;min-width:0}button{font:inherit;border:0;border-radius:6px;padding:10px 14px;background:#008b8b;color:white;font-weight:700;cursor:pointer}");
+  page += F("button.secondary{background:#24292f}button.danger{background:#b42318}button.small{padding:6px 9px;font-size:13px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}");
+  page += F(".msg{margin:16px 0;padding:12px;border-radius:6px;background:#ddf4ff;border:1px solid #54aeef}.error{background:#ffebe9;border-color:#ff8182}.result-card{margin-top:14px;padding:12px;border:1px solid #d8dee4;border-radius:6px;background:#f6f8fa}");
+  page += F("table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;border-bottom:1px solid #d8dee4;padding:8px;vertical-align:top}th{width:34%;color:#57606a;font-weight:600}code{word-break:break-all}.log{max-height:220px;overflow:auto;background:#0d1117;color:#c9d1d9;border-radius:6px;padding:10px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}");
+  page += F("@media(max-width:640px){body{padding:10px}.panel{padding:14px}h1{font-size:23px}th,td{display:block;width:auto}.steps{padding-bottom:4px}}");
+  page += F("</style></head><body><main class=\"wrap\"><section class=\"panel\"><h1>");
+  page += homekit_started ? F("Tuya HomeKit Dashboard") : F("Tuya HomeKit Setup");
+  page += F("</h1><p class=\"hint\">");
+  page += homekit_started
+              ? F("Local admin dashboard for configuration, diagnostics and reset actions. This page has no login; use it only on a trusted LAN.")
+              : F("Step-by-step setup for Wi-Fi, Tuya LAN credentials and HomeKit. Secrets are stored only in ESP32 flash memory.");
+  page += F("</p>");
   if (!message.isEmpty()) {
     page += F("<div class=\"msg\">");
     page += htmlEscape(message);
     page += F("</div>");
   }
-  page += F("<form id=\"setup\" method=\"post\" action=\"/save\"><div class=\"grid\">");
+  if (homekit_started) {
+    page += F("<div class=\"grid\"><div><h2>Device / HomeKit</h2><table>");
+    addMetricRow(page, "Accessory name", config.homekit_accessory_name);
+    addMetricRow(page, "HomeKit type", homeKitServiceLabel());
+    addMetricRow(page, "Current relay state",
+                 runtime_status.relay_state_known ? onOff(runtime_status.relay_state)
+                                                  : "unknown");
+    addMetricRow(page, "Polling interval", String(config.poll_interval_seconds) + " seconds");
+    page += F("</table></div><div><h2>Tuya</h2><table>");
+    addMetricRow(page, "Tuya IP", config.tuya_ip);
+    addMetricRow(page, "Protocol version", config.tuya_protocol_version);
+    addMetricRow(page, "Relay DPS", config.tuya_relay_dps);
+    addMetricRow(page, "Last status", runtime_status.last_tuya_status);
+    addMetricRow(page, "Last latency", String(runtime_status.last_latency_ms) + " ms");
+    addMetricRow(page, "Failed poll count", String(runtime_status.failed_poll_count));
+    page += F("</table></div><div><h2>Network</h2><table>");
+    addMetricRow(page, "Wi-Fi SSID", WiFi.SSID());
+    addMetricRow(page, "ESP32 IP address", WiFi.localIP().toString());
+    addMetricRow(page, "RSSI", String(WiFi.RSSI()) + " dBm");
+    addMetricRow(page, "Uptime", formatDuration(millis() / 1000));
+    addMetricRow(page, "Free heap", String(ESP.getFreeHeap()) + " bytes");
+    page += F("</table></div></div><div class=\"actions\">");
+    page += F("<button class=\"secondary\" type=\"button\" id=\"dashTest\">Test Tuya connection</button>");
+    page += F("<button class=\"secondary\" type=\"button\" id=\"dashDps\">Scan DPS</button>");
+    page += F("<button class=\"secondary\" type=\"button\" id=\"restart\">Restart ESP32</button>");
+    page += F("<button class=\"danger\" type=\"button\" id=\"resetDash\">Reset configuration</button>");
+    page += F("<button class=\"danger\" type=\"button\" id=\"unpairDash\">Reset HomeKit pairing</button>");
+    page += F("</div><div id=\"dashboardResult\"></div><h2 style=\"margin-top:18px\">Diagnostics log</h2><div class=\"log\">");
+    if (diagnostic_log_count == 0) {
+      page += F("No diagnostic events yet.");
+    } else {
+      for (uint8_t i = 0; i < diagnostic_log_count; i++) {
+        const uint8_t index = (diagnostic_log_start + i) % DIAGNOSTIC_LOG_SIZE;
+        page += htmlEscape(diagnostic_log[index]);
+        page += F("<br>");
+      }
+    }
+    page += F("</div>");
+  }
+  page += F("</section><section class=\"panel\"><h2>");
+  page += homekit_started ? F("Edit configuration") : F("Setup wizard");
+  page += F("</h2><form id=\"setup\" method=\"post\" action=\"/save\">");
+  page += F("<div class=\"steps\"><button type=\"button\" class=\"step-dot active\" data-step-button=\"0\">1 Wi-Fi</button><button type=\"button\" class=\"step-dot\" data-step-button=\"1\">2 Find Tuya</button><button type=\"button\" class=\"step-dot\" data-step-button=\"2\">3 Credentials</button><button type=\"button\" class=\"step-dot\" data-step-button=\"3\">4 Test</button><button type=\"button\" class=\"step-dot\" data-step-button=\"4\">5 HomeKit</button><button type=\"button\" class=\"step-dot\" data-step-button=\"5\">6 Save</button></div>");
+
+  page += F("<div class=\"step active\" data-step=\"0\"><div class=\"grid\">");
   page += F("<label>Wi-Fi SSID<input name=\"wifi_ssid\" required value=\"");
   page += htmlEscape(config.wifi_ssid);
   page += F("\"><span class=\"help\">Name of your home, IoT, or guest Wi-Fi network.</span></label>");
   page += F("<label>Wi-Fi password<input name=\"wifi_password\" type=\"password\" value=\"");
   page += F("\" placeholder=\"Leave blank to keep saved password\"><span class=\"help\">Leave blank when editing if the saved Wi-Fi password should stay unchanged.</span></label>");
+  page += F("</div></div>");
+
+  page += F("<div class=\"step\" data-step=\"1\"><p class=\"help\">Experimental LAN scan checks common Tuya ports on the ESP32 subnet. Results are only candidates.</p><div class=\"actions\"><button class=\"secondary\" type=\"button\" id=\"scan\">Find Tuya devices</button></div><div id=\"scanResult\"></div>");
   page += F("<label>Tuya plug IP address<input name=\"tuya_ip\" required placeholder=\"192.168.1.123\" value=\"");
   page += htmlEscape(config.tuya_ip);
   page += F("\"><span class=\"help\">Local IP address of the Tuya / Smart Life plug on your router.</span></label>");
+  page += F("</div>");
+
+  page += F("<div class=\"step\" data-step=\"2\"><div class=\"grid\">");
   page += F("<label>Tuya device ID<input name=\"tuya_device_id\" required value=\"");
   page += htmlEscape(config.tuya_device_id);
   page += F("\"><span class=\"help\">Device ID from Tuya / Smart Life developer data. This is not the IP address.</span></label>");
@@ -1064,6 +1540,11 @@ String setupPage(const String& message) {
   page += F("<label>Relay DPS<input name=\"tuya_relay_dps\" required value=\"");
   page += htmlEscape(config.tuya_relay_dps);
   page += F("\"><span class=\"help\">DPS means Tuya datapoint. It is the number Tuya uses for a value inside the plug. For the tested socket, relay on/off is DPS 1.</span></label>");
+  page += F("</div></div>");
+
+  page += F("<div class=\"step\" data-step=\"3\"><p class=\"help\">Run Test Tuya connection first. If it succeeds, Scan DPS can show returned datapoints without toggling anything.</p><div class=\"actions\"><button class=\"secondary\" type=\"button\" id=\"test\">Test Tuya connection</button><button class=\"secondary\" type=\"button\" id=\"dps\">Scan DPS</button></div><div id=\"result\"></div></div>");
+
+  page += F("<div class=\"step\" data-step=\"4\"><div class=\"grid\">");
   page += F("<label>HomeKit accessory name<input name=\"homekit_accessory_name\" required value=\"");
   page += htmlEscape(config.homekit_accessory_name);
   page += F("\"><span class=\"help\">Name shown in Apple Home. Changing it later may require removing and adding the accessory again.</span></label>");
@@ -1076,25 +1557,37 @@ String setupPage(const String& message) {
   page += optionSelected(config.homekit_service_type, "switch");
   page += F(">Switch</option></select><span class=\"help\">Outlet is best for a physical smart plug. Use Light only if the plug controls a lamp. Changing type usually needs HomeKit unpair and re-pair.</span></label>");
   page += F("<label>HomeKit pairing code<input name=\"homekit_pairing_code\" inputmode=\"numeric\" pattern=\"[0-9]{8}\" maxlength=\"8\" placeholder=\"Optional, 8 digits\"><span class=\"help\">Code used when adding the ESP32 in Apple Home. Enter your own 8-digit code and write it down. If blank and never changed, HomeSpan uses default 466-37-726. If forgotten, enter a new code and save.</span></label>");
+  page += F("</div><div class=\"result-card\"><h3>HomeKit pairing</h3><p class=\"help\">Apple Home asks for a HomeKit setup code when adding the accessory. The code is not your Wi-Fi password and it is not the temporary setup AP password. Use the code you entered above, or the HomeSpan default 466-37-726 if you never changed it.</p></div></div>");
+
+  page += F("<div class=\"step\" data-step=\"5\"><div class=\"grid\">");
   page += F("<label>Polling interval, seconds<input name=\"poll_interval_seconds\" type=\"number\" min=\"5\" max=\"3600\" value=\"");
   page += String(config.poll_interval_seconds);
-  page += F("\"><span class=\"help\">How often the ESP32 checks the plug state in the background. 30 seconds is a safe default.</span></label></div><div class=\"actions\">");
+  page += F("\"><span class=\"help\">How often the ESP32 checks the plug state in the background. 30 seconds is a safe default.</span></label></div><p class=\"help\">Saving restarts the ESP32. After restart, use Apple Home to pair with the HomeKit code above.</p>");
+  page += F("</div><div class=\"actions\">");
+  page += F("<button class=\"secondary\" type=\"button\" id=\"prev\">Back</button><button class=\"secondary\" type=\"button\" id=\"next\">Next</button>");
   page += F("<button type=\"submit\">Save and restart</button>");
-  page += F("<button class=\"secondary\" type=\"button\" id=\"test\">Test Tuya connection</button>");
   page += F("<button class=\"danger\" type=\"button\" id=\"reset\">Clear saved config</button>");
   if (homekit_started) {
     page += F("<button class=\"danger\" type=\"button\" id=\"unpair\">Clear HomeKit pairing</button>");
   }
-  page += F("</div></form><div class=\"box\"><h2>HomeKit pairing</h2><p class=\"help\">Apple Home asks for a HomeKit setup code when adding the accessory. The code is not your Wi-Fi password and it is not the temporary setup AP password. Use the code you entered above, or the HomeSpan default 466-37-726 if you never changed it.</p></div>");
-  page += F("<p class=\"foot\" id=\"result\">Setup AP: ");
+  page += F("</div></form><p class=\"help\">Setup AP: ");
   page += SETUP_AP_SSID;
   page += F(" · In setup mode open http://192.168.4.1/ · In normal mode open the ESP32 IP with port ");
   page += String(ADMIN_PORT);
-  page += F(" printed in Serial Monitor.</p>");
-  page += F("<script>const form=document.getElementById('setup');const result=document.getElementById('result');");
-  page += F("document.getElementById('test').onclick=async()=>{result.textContent='Testing...';try{const r=await fetch('/test',{method:'POST',body:new FormData(form)});result.textContent=await r.text();}catch(e){result.textContent='Test request failed.'}};");
-  page += F("document.getElementById('reset').onclick=async()=>{if(confirm('Clear saved configuration and restart setup mode?')){const r=await fetch('/reset',{method:'POST'});result.textContent=await r.text();}};");
-  page += F("const unpair=document.getElementById('unpair');if(unpair)unpair.onclick=async()=>{if(confirm('Clear HomeKit pairing on the ESP32? Also remove this accessory in Apple Home.')){const r=await fetch('/unpair',{method:'POST'});result.textContent=await r.text();}};");
+  page += F(".</p></section>");
+  page += F("<script>");
+  page += F("const form=document.getElementById('setup');const steps=[...document.querySelectorAll('.step')];const dots=[...document.querySelectorAll('.step-dot')];let step=0;");
+  page += F("function showStep(n){step=Math.max(0,Math.min(steps.length-1,n));steps.forEach((el,i)=>el.classList.toggle('active',i===step));dots.forEach((el,i)=>el.classList.toggle('active',i===step));}");
+  page += F("dots.forEach((b,i)=>b.onclick=()=>showStep(i));document.getElementById('next').onclick=()=>showStep(step+1);document.getElementById('prev').onclick=()=>showStep(step-1);");
+  page += F("function target(id){return document.getElementById(id)||document.getElementById('dashboardResult')||document.getElementById('result');}");
+  page += F("async function postHtml(url,outId,msg){const out=target(outId);out.innerHTML='<div class=\"result-card\">'+msg+'</div>';try{const r=await fetch(url,{method:'POST',body:new FormData(form)});out.innerHTML=await r.text();}catch(e){out.innerHTML='<div class=\"result-card error\">Request failed.</div>';}}");
+  page += F("document.getElementById('test').onclick=()=>postHtml('/test','result','Testing Tuya connection...');document.getElementById('dps').onclick=()=>postHtml('/dps','result','Scanning DPS...');document.getElementById('scan').onclick=()=>postHtml('/scan','scanResult','Scanning LAN. This can take a few seconds...');");
+  page += F("const dt=document.getElementById('dashTest');if(dt)dt.onclick=()=>postHtml('/test','dashboardResult','Testing Tuya connection...');const dd=document.getElementById('dashDps');if(dd)dd.onclick=()=>postHtml('/dps','dashboardResult','Scanning DPS...');");
+  page += F("window.useIp=ip=>{form.tuya_ip.value=ip;showStep(2)};window.useDps=dps=>{form.tuya_relay_dps.value=dps;showStep(2)};");
+  page += F("async function postPlain(url,msg){const out=target('dashboardResult');out.innerHTML='<div class=\"result-card\">'+msg+'</div>';const r=await fetch(url,{method:'POST'});out.innerHTML='<div class=\"result-card\">'+await r.text()+'</div>';}");
+  page += F("document.getElementById('reset').onclick=()=>{if(confirm('Clear saved configuration and restart setup mode?'))postPlain('/reset','Resetting...')};const rd=document.getElementById('resetDash');if(rd)rd.onclick=()=>{if(confirm('Clear saved configuration and restart setup mode?'))postPlain('/reset','Resetting...')};");
+  page += F("const unpair=document.getElementById('unpair');if(unpair)unpair.onclick=()=>{if(confirm('Clear HomeKit pairing on the ESP32? Also remove this accessory in Apple Home.'))postPlain('/unpair','Clearing HomeKit pairing...')};const ud=document.getElementById('unpairDash');if(ud)ud.onclick=()=>{if(confirm('Clear HomeKit pairing on the ESP32? Also remove this accessory in Apple Home.'))postPlain('/unpair','Clearing HomeKit pairing...')};");
+  page += F("const restart=document.getElementById('restart');if(restart)restart.onclick=()=>{if(confirm('Restart ESP32 now?'))postPlain('/restart','Restarting...')};");
   page += F("</script></main></body></html>");
   return page;
 }
@@ -1112,10 +1605,12 @@ bool connectConfiguredWiFi(const BridgeConfig& candidate, bool keep_ap) {
   Serial.println();
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("Wi-Fi connection failed.");
+    addDiagnosticLog("Wi-Fi connection failed");
     return false;
   }
   Serial.print("ESP32 IP: ");
   Serial.println(WiFi.localIP());
+  addDiagnosticLog("Wi-Fi connected: " + WiFi.localIP().toString());
   return true;
 }
 
@@ -1155,7 +1650,15 @@ void handleSaveConfig() {
 
 void handleResetConfig() {
   clearConfig();
+  addDiagnosticLog("Configuration reset from web UI");
   requestServer().send(200, "text/plain", "Configuration cleared. Restarting...");
+  delay(700);
+  ESP.restart();
+}
+
+void handleRestart() {
+  addDiagnosticLog("Restart requested from dashboard");
+  requestServer().send(200, "text/plain", "ESP32 is restarting...");
   delay(700);
   ESP.restart();
 }
@@ -1220,7 +1723,9 @@ void handleTestConfig() {
   const BridgeConfig candidate = configFromRequest();
   String error;
   if (!validateConfig(candidate, error)) {
-    requestServer().send(400, "text/plain", error);
+    requestServer().send(400, "text/html",
+                         String("<div class=\"result-card error\">") +
+                             htmlEscape(error) + "</div>");
     return;
   }
 
@@ -1228,7 +1733,8 @@ void handleTestConfig() {
   config = candidate;
   if (!parseLocalKey()) {
     config = previous;
-    requestServer().send(400, "text/plain", "Tuya local key is invalid.");
+    requestServer().send(400, "text/html",
+                         F("<div class=\"result-card error\">Tuya local key is invalid.</div>"));
     return;
   }
 
@@ -1237,21 +1743,91 @@ void handleTestConfig() {
     if (!connectConfiguredWiFi(candidate, true)) {
       WiFi.disconnect(false);
       config = previous;
-      requestServer().send(408, "text/plain",
-                        "Wi-Fi connection failed. Check SSID and password.");
+      requestServer().send(408, "text/html",
+                           F("<div class=\"result-card error\">Wi-Fi connection failed. Check SSID and password.</div>"));
       return;
     }
   }
-  const bool ok = tuyaStatus();
+  const TuyaDiagnostics diagnostics = runTuyaDiagnostics();
   resetTuyaSession();
   if (!already_on_wifi) {
     WiFi.disconnect(false);
     WiFi.mode(WIFI_AP);
   }
   config = previous;
-  requestServer().send(ok ? 200 : 502, "text/plain",
-                    ok ? "Tuya connection test succeeded."
-                       : "Tuya connection test failed. Check IP, local key, protocol version, and LAN reachability.");
+  if (diagnostics.error == "OK") {
+    runtime_status.last_tuya_status = "Manual test OK";
+    runtime_status.last_latency_ms = diagnostics.latency_ms;
+    runtime_status.relay_state_known = diagnostics.relay_state_known;
+    runtime_status.relay_state = diagnostics.relay_state;
+    addDiagnosticLog("Test connection OK");
+  } else {
+    runtime_status.last_tuya_status = diagnostics.error;
+    runtime_status.failed_poll_count++;
+    addDiagnosticLog("Test connection failed: " + diagnostics.error);
+  }
+  requestServer().send(diagnostics.error == "OK" ? 200 : 502, "text/html",
+                       diagnosticsHtml(diagnostics));
+}
+
+void handleLanScan() {
+  const BridgeConfig candidate = configFromRequest();
+  requestServer().send(200, "text/html", lanScanHtml(candidate));
+}
+
+void handleDpsScan() {
+  const BridgeConfig candidate = configFromRequest();
+  String error;
+  if (!validateConfig(candidate, error)) {
+    requestServer().send(400, "text/html",
+                         String("<div class=\"result-card error\">") +
+                             htmlEscape(error) + "</div>");
+    return;
+  }
+
+  const BridgeConfig previous = config;
+  config = candidate;
+  if (!parseLocalKey()) {
+    config = previous;
+    requestServer().send(400, "text/html",
+                         F("<div class=\"result-card error\">Tuya local key is invalid.</div>"));
+    return;
+  }
+
+  const bool already_on_wifi = homekit_started && WiFi.status() == WL_CONNECTED;
+  if (!already_on_wifi && !connectConfiguredWiFi(candidate, true)) {
+    WiFi.disconnect(false);
+    config = previous;
+    requestServer().send(408, "text/html",
+                         F("<div class=\"result-card error\">Wi-Fi connection failed. Check SSID and password.</div>"));
+    return;
+  }
+
+  String payload_json;
+  uint32_t latency_ms = 0;
+  String query_error;
+  const bool ok = tuyaQueryStatusPayload(payload_json, &latency_ms, &query_error);
+  resetTuyaSession();
+  if (!already_on_wifi) {
+    WiFi.disconnect(false);
+    WiFi.mode(WIFI_AP);
+  }
+  config = previous;
+
+  if (!ok) {
+    runtime_status.last_tuya_status = query_error;
+    runtime_status.failed_poll_count++;
+    addDiagnosticLog("DPS scan failed: " + query_error);
+    requestServer().send(502, "text/html",
+                         String("<div class=\"result-card error\">DPS scan failed: ") +
+                             htmlEscape(query_error) + "</div>");
+    return;
+  }
+
+  runtime_status.last_tuya_status = "DPS scan OK";
+  runtime_status.last_latency_ms = latency_ms;
+  addDiagnosticLog("DPS scan OK");
+  requestServer().send(200, "text/html", dpsInspectorHtml(payload_json));
 }
 
 void startSetupMode(const String& reason, bool retry_saved_wifi = false) {
@@ -1287,9 +1863,13 @@ void startSetupMode(const String& reason, bool retry_saved_wifi = false) {
   setup_server.on("/save", HTTP_POST, handleSaveConfig);
   setup_server.on("/reset", HTTP_POST, handleResetConfig);
   setup_server.on("/test", HTTP_POST, handleTestConfig);
+  setup_server.on("/scan", HTTP_POST, handleLanScan);
+  setup_server.on("/dps", HTTP_POST, handleDpsScan);
   setup_server.on("/unpair", HTTP_POST, handleUnpairHomeKit);
+  setup_server.on("/restart", HTTP_POST, handleRestart);
   setup_server.onNotFound(handleSetupRoot);
   setup_server.begin();
+  addDiagnosticLog("Setup mode started");
 }
 
 void startAdminServer() {
@@ -1297,13 +1877,17 @@ void startAdminServer() {
   admin_server.on("/save", HTTP_POST, handleSaveConfig);
   admin_server.on("/reset", HTTP_POST, handleResetConfig);
   admin_server.on("/test", HTTP_POST, handleTestConfig);
+  admin_server.on("/scan", HTTP_POST, handleLanScan);
+  admin_server.on("/dps", HTTP_POST, handleDpsScan);
   admin_server.on("/unpair", HTTP_POST, handleUnpairHomeKit);
+  admin_server.on("/restart", HTTP_POST, handleRestart);
   admin_server.onNotFound(handleSetupRoot);
   admin_server.begin();
   Serial.print("Admin URL: http://");
   Serial.print(WiFi.localIP());
   Serial.print(":");
   Serial.println(ADMIN_PORT);
+  addDiagnosticLog("Admin dashboard started");
 }
 
 void maybeRetrySavedWiFiFromSetup() {
@@ -1588,6 +2172,7 @@ void setup() {
   homeSpan.setControllerCallback(refreshHomeKitPairingState);
   homeSpan.begin(homeKitCategory(), config.homekit_accessory_name.c_str());
   refreshHomeKitPairingState();
+  addDiagnosticLog("HomeSpan started");
 
   new SpanAccessory();
   new Service::AccessoryInformation();
@@ -1596,7 +2181,7 @@ void setup() {
   new Characteristic::Manufacturer(config.homekit_manufacturer.c_str());
   new Characteristic::Model(config.homekit_model.c_str());
   new Characteristic::SerialNumber(config.tuya_device_id.c_str());
-  new Characteristic::FirmwareRevision("2.0.0");
+  new Characteristic::FirmwareRevision("2.1.0");
   if (config.homekit_service_type == "light") {
     new HomeKitTuyaLight();
   } else if (config.homekit_service_type == "switch") {
