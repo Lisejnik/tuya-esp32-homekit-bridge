@@ -1596,7 +1596,7 @@ void setup() {
   new Characteristic::Manufacturer(config.homekit_manufacturer.c_str());
   new Characteristic::Model(config.homekit_model.c_str());
   new Characteristic::SerialNumber(config.tuya_device_id.c_str());
-  new Characteristic::FirmwareRevision("0.2.0");
+  new Characteristic::FirmwareRevision("2.0.0");
   if (config.homekit_service_type == "light") {
     new HomeKitTuyaLight();
   } else if (config.homekit_service_type == "switch") {

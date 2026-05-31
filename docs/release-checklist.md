@@ -4,9 +4,9 @@ Use this checklist to prepare the next GitHub release. The project should still 
 
 ## Suggested Version
 
-`v0.2.0`
+`v2.0`
 
-Reason: the HomeSpan sketch changes from source-code configuration to a user-facing ESP32 setup wizard.
+Reason: the HomeSpan sketch changes from source-code configuration to a user-facing ESP32 setup wizard with LAN admin, HomeKit pairing controls, factory reset, and LED status feedback.
 
 ## Pre-release Checks
 
@@ -35,9 +35,12 @@ Also verify:
 - random setup AP password is printed in Serial Monitor
 - setup form saves config and restarts
 - **Test Tuya connection** reports success with known-good values
+- normal boot prints an admin URL on port `8080`
 - Wi-Fi failure falls back to setup mode and retries saved Wi-Fi
-- **Clear saved config** clears bridge config but does not claim to clear HomeSpan pairing data
-- GPIO0 / BOOT reset path is documented with the bootloader caveat
+- **Clear saved config** clears bridge config
+- **Clear HomeKit pairing** clears HomeKit pairing on the ESP32
+- GPIO0 / BOOT long-hold factory reset is documented with the bootloader caveat
+- status LED behavior is documented
 - README and beginner guide match the current setup flow
 
 ## Suggested Git Commands
@@ -45,36 +48,41 @@ Also verify:
 After committing release changes:
 
 ```bash
-git tag -a v0.2.0 -m "Release v0.2.0"
+git tag -a v2.0 -m "Release v2.0"
 git push origin main
-git push origin v0.2.0
+git push origin v2.0
 ```
 
-Then create the GitHub release from tag `v0.2.0`.
+Then create the GitHub release from tag `v2.0`.
 
 ## Suggested GitHub Release Title
 
 ```text
-v0.2.0 - ESP32 web setup wizard
+v2.0 - ESP32 web setup wizard
 ```
 
 ## Suggested GitHub Release Notes
 
 ```markdown
-Second experimental release of Tuya ESP32 HomeKit Bridge.
+Second public release of Tuya ESP32 HomeKit Bridge.
 
-This release adds a first ESP32 web setup wizard so users no longer need to edit the HomeSpan sketch source code or create `secrets.h` for normal HomeKit setup.
+This release adds a first ESP32 web setup wizard and LAN admin page so users no longer need to edit the HomeSpan sketch source code or create `secrets.h` for normal HomeKit setup.
 
 New:
 
 - first-boot setup Wi-Fi access point: `TuyaHomeKit-Setup`
 - random setup AP password printed in Serial Monitor
 - plain local setup page at `http://192.168.4.1/`
-- ESP32 Preferences storage for Wi-Fi, Tuya, HomeKit name, relay DPS, and polling interval
+- LAN admin page on port `8080` after Wi-Fi connection
+- ESP32 Preferences storage for Wi-Fi, Tuya, HomeKit name, HomeKit type, relay DPS, and polling interval
+- HomeKit pairing code field
 - setup-page **Test Tuya connection** action
 - setup-page **Clear saved config** action
+- admin-page **Clear HomeKit pairing** action
 - Wi-Fi failure fallback to setup mode with periodic retry
-- configurable relay DPS and polling interval
+- BOOT / GPIO0 long-hold factory reset
+- configurable HomeKit type, relay DPS, and polling interval
+- status LED feedback for setup, Wi-Fi success, paired idle state, and Wi-Fi/Tuya errors
 
 Still verified with:
 
@@ -88,6 +96,7 @@ Important notes:
 
 - HomeSpan sketch requires an ESP32 partition with at least a 2 MB app slot, for example `No OTA (2MB APP/2MB SPIFFS)`.
 - The setup page uses plain HTTP on the temporary ESP32 setup network.
+- The LAN admin page uses plain local HTTP without login and should only be used on a trusted LAN or IoT network.
 - Wi-Fi passwords and Tuya local keys are stored in ESP32 Preferences in plaintext.
 - The ESP32 Tuya local POC still uses generated `secrets.h`; the HomeSpan sketch does not.
 - This is still experimental and not intended for critical loads.
@@ -98,6 +107,6 @@ Important notes:
 - Add screenshots of the setup wizard
 - Add a compatibility table for tested plugs
 - Add optional captive portal DNS redirect
-- Add a true factory-reset path that also clears HomeSpan pairing data
 - Extract Tuya protocol logic into a reusable C++ class
 - Investigate Tuya protocol versions beyond `3.4`
+- Add optional admin password or disable admin after setup

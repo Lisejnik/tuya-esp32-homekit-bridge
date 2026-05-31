@@ -2,11 +2,17 @@
 
 ## Unreleased
 
+- Nothing yet.
+
+## v2.0 - ESP32 Web Setup Wizard
+
 - Add first ESP32 setup Wi-Fi access point and web configuration wizard.
 - Store HomeSpan sketch configuration in ESP32 flash using Preferences.
-- Add setup form fields for Wi-Fi, Tuya plug, HomeKit name, relay DPS, and polling interval.
-- Add setup-page Tuya connection test and configuration reset action.
-- Add GPIO0 / BOOT reset path to clear saved configuration.
+- Add setup form fields for Wi-Fi, Tuya plug, HomeKit name, HomeKit type, HomeKit pairing code, relay DPS, and polling interval.
+- Add LAN admin page on port `8080` after normal Wi-Fi connection.
+- Add setup/admin Tuya connection test, configuration reset, and HomeKit pairing reset actions.
+- Add GPIO0 / BOOT long-hold factory reset path.
+- Add status LED feedback for setup, Wi-Fi success, paired idle state, and Wi-Fi/Tuya errors.
 - Keep ESP32 local Tuya POC on generated `secrets.h` while removing `secrets.h` from the HomeSpan setup flow.
 
 ## v0.1.0 - Initial Experimental Release
