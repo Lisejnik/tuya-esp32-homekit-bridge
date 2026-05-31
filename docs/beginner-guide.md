@@ -275,6 +275,8 @@ Fill the setup form:
 - Tuya protocol version: `3.4`
 - relay DPS: `1`
 - HomeKit accessory name
+- HomeKit type: `Outlet`
+- HomeKit pairing code: your own 8-digit code, or blank for HomeSpan default `466-37-726`
 - polling interval: `30`
 
 The setup page uses plain HTTP on the temporary ESP32 setup network. Stay near the ESP32 while configuring it and save valid settings so setup mode turns off. Wi-Fi passwords and Tuya local keys are stored in ESP32 Preferences in plaintext, so use an IoT or guest Wi-Fi network if possible. If you open setup mode later, saved Wi-Fi passwords and Tuya local keys are not displayed; leave those fields blank to keep the saved values.
@@ -287,17 +289,35 @@ After restart, the ESP32 should connect to your normal Wi-Fi and start HomeSpan.
 
 If it cannot connect to Wi-Fi, it will return to setup mode.
 
+When the ESP32 starts normally, Serial Monitor prints an admin URL like:
+
+```text
+Admin URL: http://192.168.1.50:8080
+```
+
+Open that address from the same Wi-Fi network if you need to edit saved settings later. The admin page can also clear HomeKit pairing on the ESP32. It is plain local HTTP without login, so use it only on a trusted LAN or IoT network.
+
 To clear bridge configuration later, hold GPIO0 / BOOT while the ESP32 starts. On some ESP32 boards, holding BOOT too early enters flashing mode instead; if that happens, press BOOT just after reset or use **Clear saved config** when the setup page is open. This does not clear HomeSpan pairing data.
 
 ## Phase 11: Set HomeKit Pairing Code
 
-In Serial Monitor, set your own 8-digit pairing code:
+The HomeKit pairing code is the 8-digit code Apple Home asks for when adding the accessory. It is not your Wi-Fi password and it is not the temporary setup Wi-Fi password.
+
+The easiest option is to enter your own 8-digit code in the setup page before saving. Write it down.
+
+If you left the field blank and never changed HomeSpan's code before, the fallback default is:
+
+```text
+466-37-726
+```
+
+You can also set a code in Serial Monitor:
 
 ```text
 S 11223344
 ```
 
-Use your own code, not the example. Write it down.
+Use your own code, not the example. Type it without hyphens and write it down.
 
 Apple Home displays HomeKit codes with hyphens. For example, `S 11223344` becomes:
 
@@ -316,6 +336,8 @@ After pairing:
 - turn the outlet on from Apple Home
 - turn it off from Apple Home
 - press the physical plug button and wait up to 30 seconds for HomeKit state to update
+
+If you later change the HomeKit type from Outlet to Light or Switch, remove the accessory in Apple Home, click **Clear HomeKit pairing** on the ESP32 admin page, restart, and add it again.
 
 ## When to Open a GitHub Issue
 

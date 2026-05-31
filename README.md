@@ -334,6 +334,8 @@ Fill:
 - Tuya protocol version, default `3.4`
 - relay DPS, default `1`
 - HomeKit accessory name
+- HomeKit type, default `Outlet`
+- optional HomeKit pairing code
 - polling interval in seconds, default `30`
 
 The setup page uses plain HTTP on the temporary ESP32 setup network. Configure it near the ESP32 and do not leave setup mode running longer than needed. Saved Wi-Fi passwords and Tuya local keys are stored in ESP32 Preferences in plaintext, but they are not shown back in the form; leave those fields blank to keep existing saved values when reconfiguring. Use an IoT or guest Wi-Fi network if possible.
@@ -342,13 +344,33 @@ Use **Test Tuya connection** before saving if you want a quick check from the se
 
 Click **Save and restart**. On the next boot, the ESP32 loads the saved config from flash, connects to Wi-Fi, starts HomeSpan, and exposes the plug to HomeKit.
 
+After normal boot, Serial Monitor prints an admin URL with the ESP32's LAN IP address, for example:
+
+```text
+Admin URL: http://192.168.1.50:8080
+```
+
+Open that URL from the same Wi-Fi network to edit the saved Tuya/HomeKit settings, test the Tuya connection, clear bridge configuration, or clear HomeKit pairing on the ESP32. The admin page is plain local HTTP without login, so use it only on a trusted LAN or IoT network.
+
 If Wi-Fi connection fails repeatedly during boot, the ESP32 falls back to setup mode and periodically retries the saved Wi-Fi. If the network comes back, the ESP32 restarts into normal HomeSpan mode.
 
 To clear the bridge configuration, hold GPIO0 / BOOT while the ESP32 starts. On some dev boards, holding BOOT before reset enters the bootloader; if that happens, press BOOT just after reset or use **Clear saved config** while setup mode is active. This does not clear HomeSpan pairing data.
 
 The HomeSpan sketch no longer requires `esp32/homespan_tuya_outlet/secrets.h`. Secrets are stored in ESP32 flash memory through the setup wizard and must still never be committed or shared.
 
-After the ESP32 is configured and has restarted, set the HomeKit pairing code before adding it in Apple Home.
+### HomeKit Pairing Code
+
+The HomeKit pairing code is the 8-digit code Apple Home asks for when adding the accessory. It is not the Wi-Fi password and it is not the temporary setup AP password.
+
+The setup/admin page has an optional **HomeKit pairing code** field:
+
+- enter your own 8-digit code before pairing and write it down
+- type it without hyphens, for example `11223344`
+- Apple Home displays it with hyphens, for example `112-23-344`
+- if left blank and never changed, HomeSpan uses its default code `466-37-726`
+- if forgotten, enter a new code in the admin page and save/restart
+
+HomeSpan stores a hashed pairing code internally. The real code cannot be read back from the ESP32 later.
 
 Equivalent `arduino-cli` compile check:
 
@@ -356,11 +378,11 @@ Equivalent `arduino-cli` compile check:
 arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=no_ota esp32/homespan_tuya_outlet
 ```
 
-### Set HomeKit Pairing Code
+### Set HomeKit Pairing Code from Serial
 
 For security, do not hardcode the HomeKit pairing code in the sketch.
 
-After flashing, open Serial Monitor at `115200` and use the HomeSpan CLI command:
+As an alternative to the web field, open Serial Monitor at `115200` and use the HomeSpan CLI command:
 
 ```text
 S 11223344
@@ -381,13 +403,25 @@ When Apple Home asks for the setup code, enter it in the usual HomeKit format. F
 
 for the Serial command `S 11223344`.
 
+### HomeKit Type and Re-Pairing
+
+The setup/admin page can expose the same Tuya relay as a HomeKit `Outlet`, `Light`, or generic `Switch`.
+
+Use:
+
+- `Outlet` for a physical smart plug
+- `Light` only when the plug controls a lamp
+- `Switch` for a generic on/off device
+
+If you change HomeKit type or the accessory appears stale in Apple Home, remove the accessory in Apple Home, click **Clear HomeKit pairing** in the ESP32 admin page, restart, and add it again with the pairing code.
+
 ## How It Maps to HomeKit
 
 The HomeSpan sketch exposes:
 
-- HomeKit service: `Outlet`
+- HomeKit service: configured as `Outlet`, `Light`, or `Switch`
 - HomeKit `On`: Tuya relay DPS `1`
-- HomeKit `OutletInUse`: same value as relay state
+- HomeKit `OutletInUse`: same value as relay state when type is `Outlet`
 
 `OutletInUse` is currently not real power detection. It only means the relay is on.
 

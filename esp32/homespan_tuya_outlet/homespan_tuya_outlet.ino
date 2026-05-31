@@ -14,6 +14,7 @@
 namespace {
 
 constexpr uint16_t TUYA_PORT = 6668;
+constexpr uint16_t ADMIN_PORT = 8080;
 constexpr char SETUP_AP_SSID[] = "TuyaHomeKit-Setup";
 constexpr char SETUP_AP_PASSWORD_PREFIX[] = "THK";
 constexpr char PREF_NAMESPACE[] = "tuya-hk";
@@ -46,6 +47,8 @@ struct BridgeConfig {
   String tuya_protocol_version = "3.4";
   String tuya_relay_dps = "1";
   String homekit_accessory_name = "Tuya HomeKit Outlet";
+  String homekit_service_type = "outlet";
+  String homekit_pairing_code;
   String homekit_manufacturer = "Tuya Local Bridge";
   String homekit_model = "Tuya Plug via ESP32";
   uint32_t poll_interval_seconds = DEFAULT_POLL_INTERVAL_SECONDS;
@@ -62,6 +65,8 @@ struct TuyaResponse {
 BridgeConfig config;
 Preferences preferences;
 WebServer setup_server(80);
+WebServer admin_server(ADMIN_PORT);
+WebServer* active_server = &setup_server;
 WiFiClient client;
 uint32_t sequence_number = 1;
 uint8_t real_key[AES_BLOCK_SIZE] = {0};
@@ -238,6 +243,51 @@ bool isRelayDpsValid(const String& dps) {
   return true;
 }
 
+bool isHomeKitServiceTypeValid(const String& service_type) {
+  return service_type == "outlet" || service_type == "light" ||
+         service_type == "switch";
+}
+
+bool isHomeKitPairingCodeValid(const String& code) {
+  if (code.isEmpty()) {
+    return true;
+  }
+  if (code.length() != 8) {
+    return false;
+  }
+  for (size_t i = 0; i < code.length(); i++) {
+    if (!isDigit(code.charAt(i))) {
+      return false;
+    }
+  }
+  return code != "00000000" && code != "11111111" && code != "22222222" &&
+         code != "33333333" && code != "44444444" && code != "55555555" &&
+         code != "66666666" && code != "77777777" && code != "88888888" &&
+         code != "99999999" && code != "12345678" && code != "87654321";
+}
+
+String formattedHomeKitCode(const String& code) {
+  if (code.length() != 8) {
+    return "";
+  }
+  return code.substring(0, 3) + "-" + code.substring(3, 5) + "-" +
+         code.substring(5);
+}
+
+Category homeKitCategory() {
+  if (config.homekit_service_type == "light") {
+    return Category::Lighting;
+  }
+  if (config.homekit_service_type == "switch") {
+    return Category::Switches;
+  }
+  return Category::Outlets;
+}
+
+String optionSelected(const String& value, const String& expected) {
+  return value == expected ? " selected" : "";
+}
+
 bool isPrintableAscii(const String& value) {
   for (size_t i = 0; i < value.length(); i++) {
     const char ch = value.charAt(i);
@@ -324,6 +374,14 @@ bool validateConfig(const BridgeConfig& candidate, String& error) {
     error = "HomeKit accessory name must be printable ASCII and at most 40 characters.";
     return false;
   }
+  if (!isHomeKitServiceTypeValid(candidate.homekit_service_type)) {
+    error = "HomeKit type must be outlet, light, or switch.";
+    return false;
+  }
+  if (!isHomeKitPairingCodeValid(candidate.homekit_pairing_code)) {
+    error = "HomeKit pairing code must be empty or a valid 8-digit code. Avoid simple codes like 11111111 or 12345678.";
+    return false;
+  }
   return true;
 }
 
@@ -347,6 +405,8 @@ bool loadConfig() {
   config.tuya_relay_dps = preferences.getString("relay_dps", "1");
   config.homekit_accessory_name =
       preferences.getString("hk_name", "Tuya HomeKit Outlet");
+  config.homekit_service_type = preferences.getString("hk_service", "outlet");
+  config.homekit_pairing_code = preferences.getString("hk_pair", "");
   config.homekit_manufacturer =
       preferences.getString("hk_mfr", "Tuya Local Bridge");
   config.homekit_model =
@@ -385,6 +445,10 @@ bool saveConfig(const BridgeConfig& candidate, String& error) {
   preferences.putString("tuya_ver", normalized.tuya_protocol_version);
   preferences.putString("relay_dps", normalized.tuya_relay_dps);
   preferences.putString("hk_name", normalized.homekit_accessory_name);
+  preferences.putString("hk_service", normalized.homekit_service_type);
+  if (!normalized.homekit_pairing_code.isEmpty()) {
+    preferences.putString("hk_pair", normalized.homekit_pairing_code);
+  }
   preferences.putString("hk_mfr", normalized.homekit_manufacturer);
   preferences.putString("hk_model", normalized.homekit_model);
   preferences.putUInt("poll_sec", normalized.poll_interval_seconds);
@@ -406,18 +470,20 @@ void clearConfig() {
 
 BridgeConfig configFromRequest() {
   BridgeConfig candidate;
-  candidate.wifi_ssid = setup_server.arg("wifi_ssid");
-  candidate.wifi_password = setup_server.arg("wifi_password");
-  candidate.tuya_ip = setup_server.arg("tuya_ip");
-  candidate.tuya_device_id = setup_server.arg("tuya_device_id");
-  candidate.tuya_local_key = setup_server.arg("tuya_local_key");
-  candidate.tuya_protocol_version = setup_server.arg("tuya_protocol_version");
-  candidate.tuya_relay_dps = setup_server.arg("tuya_relay_dps");
-  candidate.homekit_accessory_name = setup_server.arg("homekit_accessory_name");
+  candidate.wifi_ssid = active_server->arg("wifi_ssid");
+  candidate.wifi_password = active_server->arg("wifi_password");
+  candidate.tuya_ip = active_server->arg("tuya_ip");
+  candidate.tuya_device_id = active_server->arg("tuya_device_id");
+  candidate.tuya_local_key = active_server->arg("tuya_local_key");
+  candidate.tuya_protocol_version = active_server->arg("tuya_protocol_version");
+  candidate.tuya_relay_dps = active_server->arg("tuya_relay_dps");
+  candidate.homekit_accessory_name = active_server->arg("homekit_accessory_name");
+  candidate.homekit_service_type = active_server->arg("homekit_service_type");
+  candidate.homekit_pairing_code = active_server->arg("homekit_pairing_code");
   candidate.homekit_manufacturer = "Tuya Local Bridge";
   candidate.homekit_model = "Tuya Plug via ESP32";
   candidate.poll_interval_seconds =
-      uint32_t(setup_server.arg("poll_interval_seconds").toInt());
+      uint32_t(active_server->arg("poll_interval_seconds").toInt());
   if (candidate.wifi_password.isEmpty() && !config.wifi_password.isEmpty()) {
     candidate.wifi_password = config.wifi_password;
   }
@@ -433,10 +499,27 @@ BridgeConfig configFromRequest() {
   if (candidate.homekit_accessory_name.isEmpty()) {
     candidate.homekit_accessory_name = "Tuya HomeKit Outlet";
   }
+  if (candidate.homekit_service_type.isEmpty()) {
+    candidate.homekit_service_type = "outlet";
+  }
   if (candidate.poll_interval_seconds == 0) {
     candidate.poll_interval_seconds = DEFAULT_POLL_INTERVAL_SECONDS;
   }
   return candidate;
+}
+
+void clearPendingHomeKitPairingCode() {
+  if (!preferences.begin(PREF_NAMESPACE, false)) {
+    Serial.println("Could not open Preferences for clearing HomeKit code.");
+    return;
+  }
+  preferences.remove("hk_pair");
+  preferences.end();
+  config.homekit_pairing_code = "";
+}
+
+WebServer& requestServer() {
+  return *active_server;
 }
 
 bool parseLocalKey() {
@@ -807,19 +890,21 @@ bool tuyaSwitch(bool on) {
 
 String setupPage(const String& message) {
   String page;
-  page.reserve(9000);
+  page.reserve(14000);
   page += F("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
   page += F("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
   page += F("<title>Tuya HomeKit Setup</title><style>");
   page += F(":root{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#14212b;background:#f6f8fa}");
   page += F("body{margin:0;padding:24px}.wrap{max-width:760px;margin:0 auto;background:white;border:1px solid #d8dee4;border-radius:8px;padding:24px}");
-  page += F("h1{margin:0 0 8px;font-size:28px}.hint{color:#57606a;margin-top:0}.grid{display:grid;gap:14px}");
-  page += F("label{display:grid;gap:6px;font-weight:600}input{font:inherit;padding:10px;border:1px solid #d0d7de;border-radius:6px}");
+  page += F("h1{margin:0 0 8px;font-size:28px}.hint,.help{color:#57606a;margin-top:0}.help{font-size:13px;line-height:1.35}");
+  page += F(".grid{display:grid;gap:14px}label{display:grid;gap:6px;font-weight:600}");
+  page += F("input,select{font:inherit;padding:10px;border:1px solid #d0d7de;border-radius:6px;background:white}");
   page += F("button{font:inherit;border:0;border-radius:6px;padding:10px 14px;background:#008b8b;color:white;font-weight:700;cursor:pointer}");
   page += F("button.secondary{background:#24292f}button.danger{background:#b42318}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}");
   page += F(".msg{margin:16px 0;padding:12px;border-radius:6px;background:#ddf4ff;border:1px solid #54aeef}.foot{margin-top:18px;color:#57606a;font-size:14px}");
+  page += F(".box{margin-top:18px;padding:12px;border:1px solid #d8dee4;border-radius:6px;background:#f6f8fa}.box h2{font-size:16px;margin:0 0 8px}");
   page += F("</style></head><body><main class=\"wrap\"><h1>Tuya HomeKit Setup</h1>");
-  page += F("<p class=\"hint\">Enter the local Tuya plug values. They are stored only in ESP32 flash memory. The setup Wi-Fi password is printed in Serial Monitor.</p>");
+  page += F("<p class=\"hint\">Enter the local Tuya plug values. Secrets are stored only in ESP32 flash memory and are not shown back after saving. This local page has no login, so use it only on a trusted network.</p>");
   if (!message.isEmpty()) {
     page += F("<div class=\"msg\">");
     page += htmlEscape(message);
@@ -828,38 +913,54 @@ String setupPage(const String& message) {
   page += F("<form id=\"setup\" method=\"post\" action=\"/save\"><div class=\"grid\">");
   page += F("<label>Wi-Fi SSID<input name=\"wifi_ssid\" required value=\"");
   page += htmlEscape(config.wifi_ssid);
-  page += F("\"></label>");
+  page += F("\"><span class=\"help\">Name of your home, IoT, or guest Wi-Fi network.</span></label>");
   page += F("<label>Wi-Fi password<input name=\"wifi_password\" type=\"password\" value=\"");
-  page += F("\" placeholder=\"Leave blank to keep saved password\"></label>");
+  page += F("\" placeholder=\"Leave blank to keep saved password\"><span class=\"help\">Leave blank when editing if the saved Wi-Fi password should stay unchanged.</span></label>");
   page += F("<label>Tuya plug IP address<input name=\"tuya_ip\" required placeholder=\"192.168.1.123\" value=\"");
   page += htmlEscape(config.tuya_ip);
-  page += F("\"></label>");
+  page += F("\"><span class=\"help\">Local IP address of the Tuya / Smart Life plug on your router.</span></label>");
   page += F("<label>Tuya device ID<input name=\"tuya_device_id\" required value=\"");
   page += htmlEscape(config.tuya_device_id);
-  page += F("\"></label>");
+  page += F("\"><span class=\"help\">Device ID from Tuya / Smart Life developer data. This is not the IP address.</span></label>");
   page += F("<label>Tuya local key<input name=\"tuya_local_key\" maxlength=\"16\" value=\"");
-  page += F("\" placeholder=\"Leave blank to keep saved key\"></label>");
+  page += F("\" placeholder=\"Leave blank to keep saved key\"><span class=\"help\">16-character local key used by the ESP32 to talk directly to the plug. Leave blank when editing to keep the saved key.</span></label>");
   page += F("<label>Tuya protocol version<input name=\"tuya_protocol_version\" required value=\"");
   page += htmlEscape(config.tuya_protocol_version);
-  page += F("\"></label>");
+  page += F("\"><span class=\"help\">Keep 3.4 for the tested plug. Other versions are not supported by this first wizard.</span></label>");
   page += F("<label>Relay DPS<input name=\"tuya_relay_dps\" required value=\"");
   page += htmlEscape(config.tuya_relay_dps);
-  page += F("\"></label>");
+  page += F("\"><span class=\"help\">DPS means Tuya datapoint. It is the number Tuya uses for a value inside the plug. For the tested socket, relay on/off is DPS 1.</span></label>");
   page += F("<label>HomeKit accessory name<input name=\"homekit_accessory_name\" required value=\"");
   page += htmlEscape(config.homekit_accessory_name);
-  page += F("\"></label>");
+  page += F("\"><span class=\"help\">Name shown in Apple Home. Changing it later may require removing and adding the accessory again.</span></label>");
+  page += F("<label>HomeKit type<select name=\"homekit_service_type\">");
+  page += F("<option value=\"outlet\"");
+  page += optionSelected(config.homekit_service_type, "outlet");
+  page += F(">Outlet</option><option value=\"light\"");
+  page += optionSelected(config.homekit_service_type, "light");
+  page += F(">Light</option><option value=\"switch\"");
+  page += optionSelected(config.homekit_service_type, "switch");
+  page += F(">Switch</option></select><span class=\"help\">Outlet is best for a physical smart plug. Use Light only if the plug controls a lamp. Changing type usually needs HomeKit unpair and re-pair.</span></label>");
+  page += F("<label>HomeKit pairing code<input name=\"homekit_pairing_code\" inputmode=\"numeric\" pattern=\"[0-9]{8}\" maxlength=\"8\" placeholder=\"Optional, 8 digits\"><span class=\"help\">Code used when adding the ESP32 in Apple Home. Enter your own 8-digit code and write it down. If blank and never changed, HomeSpan uses default 466-37-726. If forgotten, enter a new code and save.</span></label>");
   page += F("<label>Polling interval, seconds<input name=\"poll_interval_seconds\" type=\"number\" min=\"5\" max=\"3600\" value=\"");
   page += String(config.poll_interval_seconds);
-  page += F("\"></label></div><div class=\"actions\">");
+  page += F("\"><span class=\"help\">How often the ESP32 checks the plug state in the background. 30 seconds is a safe default.</span></label></div><div class=\"actions\">");
   page += F("<button type=\"submit\">Save and restart</button>");
   page += F("<button class=\"secondary\" type=\"button\" id=\"test\">Test Tuya connection</button>");
   page += F("<button class=\"danger\" type=\"button\" id=\"reset\">Clear saved config</button>");
-  page += F("</div></form><p class=\"foot\" id=\"result\">Setup AP: ");
+  if (homekit_started) {
+    page += F("<button class=\"danger\" type=\"button\" id=\"unpair\">Clear HomeKit pairing</button>");
+  }
+  page += F("</div></form><div class=\"box\"><h2>HomeKit pairing</h2><p class=\"help\">Apple Home asks for a HomeKit setup code when adding the accessory. The code is not your Wi-Fi password and it is not the temporary setup AP password. Use the code you entered above, or the HomeSpan default 466-37-726 if you never changed it.</p></div>");
+  page += F("<p class=\"foot\" id=\"result\">Setup AP: ");
   page += SETUP_AP_SSID;
-  page += F(" · Password is printed in Serial Monitor · Open http://192.168.4.1/ if this page does not appear automatically.</p>");
+  page += F(" · In setup mode open http://192.168.4.1/ · In normal mode open the ESP32 IP with port ");
+  page += String(ADMIN_PORT);
+  page += F(" printed in Serial Monitor.</p>");
   page += F("<script>const form=document.getElementById('setup');const result=document.getElementById('result');");
   page += F("document.getElementById('test').onclick=async()=>{result.textContent='Testing...';try{const r=await fetch('/test',{method:'POST',body:new FormData(form)});result.textContent=await r.text();}catch(e){result.textContent='Test request failed.'}};");
   page += F("document.getElementById('reset').onclick=async()=>{if(confirm('Clear saved configuration and restart setup mode?')){const r=await fetch('/reset',{method:'POST'});result.textContent=await r.text();}};");
+  page += F("const unpair=document.getElementById('unpair');if(unpair)unpair.onclick=async()=>{if(confirm('Clear HomeKit pairing on the ESP32? Also remove this accessory in Apple Home.')){const r=await fetch('/unpair',{method:'POST'});result.textContent=await r.text();}};");
   page += F("</script></main></body></html>");
   return page;
 }
@@ -897,25 +998,44 @@ bool connectConfiguredWiFiWithRetries() {
 }
 
 void handleSetupRoot() {
-  setup_server.send(200, "text/html", setupPage(""));
+  requestServer().send(200, "text/html", setupPage(""));
 }
 
 void handleSaveConfig() {
   const BridgeConfig candidate = configFromRequest();
   String error;
   if (!saveConfig(candidate, error)) {
-    setup_server.send(400, "text/html", setupPage(error));
+    requestServer().send(400, "text/html", setupPage(error));
     return;
   }
-  setup_server.send(200, "text/html",
-                    setupPage("Configuration saved. ESP32 is restarting."));
-  delay(700);
+  String message = "Configuration saved. ESP32 is restarting.";
+  if (!candidate.homekit_pairing_code.isEmpty()) {
+    message += " HomeKit pairing code: ";
+    message += formattedHomeKitCode(candidate.homekit_pairing_code);
+    message += ". Write it down before pairing.";
+  }
+  requestServer().send(200, "text/html", setupPage(message));
+  delay(candidate.homekit_pairing_code.isEmpty() ? 700 : 2500);
   ESP.restart();
 }
 
 void handleResetConfig() {
   clearConfig();
-  setup_server.send(200, "text/plain", "Configuration cleared. Restarting...");
+  requestServer().send(200, "text/plain", "Configuration cleared. Restarting...");
+  delay(700);
+  ESP.restart();
+}
+
+void handleUnpairHomeKit() {
+  if (!homekit_started) {
+    requestServer().send(409, "text/plain",
+                      "HomeKit is not running in setup mode.");
+    return;
+  }
+  requestServer().send(200, "text/plain",
+                    "HomeKit pairing cleared on the ESP32. Remove the accessory in Apple Home too. Restarting...");
+  delay(200);
+  homeSpan.processSerialCommand("U");
   delay(700);
   ESP.restart();
 }
@@ -924,7 +1044,7 @@ void handleTestConfig() {
   const BridgeConfig candidate = configFromRequest();
   String error;
   if (!validateConfig(candidate, error)) {
-    setup_server.send(400, "text/plain", error);
+    requestServer().send(400, "text/plain", error);
     return;
   }
 
@@ -932,22 +1052,28 @@ void handleTestConfig() {
   config = candidate;
   if (!parseLocalKey()) {
     config = previous;
-    setup_server.send(400, "text/plain", "Tuya local key is invalid.");
+    requestServer().send(400, "text/plain", "Tuya local key is invalid.");
     return;
   }
-  if (!connectConfiguredWiFi(candidate, true)) {
-    WiFi.disconnect(false);
-    config = previous;
-    setup_server.send(408, "text/plain",
-                      "Wi-Fi connection failed. Check SSID and password.");
-    return;
+
+  const bool already_on_wifi = homekit_started && WiFi.status() == WL_CONNECTED;
+  if (!already_on_wifi) {
+    if (!connectConfiguredWiFi(candidate, true)) {
+      WiFi.disconnect(false);
+      config = previous;
+      requestServer().send(408, "text/plain",
+                        "Wi-Fi connection failed. Check SSID and password.");
+      return;
+    }
   }
   const bool ok = tuyaStatus();
   resetTuyaSession();
-  WiFi.disconnect(false);
-  WiFi.mode(WIFI_AP);
+  if (!already_on_wifi) {
+    WiFi.disconnect(false);
+    WiFi.mode(WIFI_AP);
+  }
   config = previous;
-  setup_server.send(ok ? 200 : 502, "text/plain",
+  requestServer().send(ok ? 200 : 502, "text/plain",
                     ok ? "Tuya connection test succeeded."
                        : "Tuya connection test failed. Check IP, local key, protocol version, and LAN reachability.");
 }
@@ -982,8 +1108,23 @@ void startSetupMode(const String& reason, bool retry_saved_wifi = false) {
   setup_server.on("/save", HTTP_POST, handleSaveConfig);
   setup_server.on("/reset", HTTP_POST, handleResetConfig);
   setup_server.on("/test", HTTP_POST, handleTestConfig);
+  setup_server.on("/unpair", HTTP_POST, handleUnpairHomeKit);
   setup_server.onNotFound(handleSetupRoot);
   setup_server.begin();
+}
+
+void startAdminServer() {
+  admin_server.on("/", HTTP_GET, handleSetupRoot);
+  admin_server.on("/save", HTTP_POST, handleSaveConfig);
+  admin_server.on("/reset", HTTP_POST, handleResetConfig);
+  admin_server.on("/test", HTTP_POST, handleTestConfig);
+  admin_server.on("/unpair", HTTP_POST, handleUnpairHomeKit);
+  admin_server.onNotFound(handleSetupRoot);
+  admin_server.begin();
+  Serial.print("Admin URL: http://");
+  Serial.print(WiFi.localIP());
+  Serial.print(":");
+  Serial.println(ADMIN_PORT);
 }
 
 void maybeRetrySavedWiFiFromSetup() {
@@ -1110,6 +1251,116 @@ struct HomeKitTuyaOutlet : Service::Outlet {
   }
 };
 
+struct HomeKitTuyaLight : Service::LightBulb {
+  SpanCharacteristic* power;
+  unsigned long last_poll_ms = 0;
+  bool last_known_power = false;
+
+  HomeKitTuyaLight() : Service::LightBulb() {
+    bool initial_power = false;
+    if (tuyaReadPower(initial_power)) {
+      last_known_power = initial_power;
+    }
+    power = new Characteristic::On(last_known_power);
+  }
+
+  boolean update() override {
+    if (!power->updated()) {
+      return true;
+    }
+
+    const bool requested_power = power->getNewVal<bool>();
+    Serial.print("HomeKit requested light ");
+    Serial.println(requested_power ? "ON" : "OFF");
+
+    if (!tuyaSwitch(requested_power)) {
+      Serial.println("Tuya command failed; rejecting HomeKit update.");
+      return false;
+    }
+
+    last_known_power = requested_power;
+    last_poll_ms = millis();
+    return true;
+  }
+
+  void loop() override {
+    const uint32_t poll_interval_ms =
+        normalizedPollInterval(config.poll_interval_seconds) * 1000;
+    if (millis() - last_poll_ms < poll_interval_ms) {
+      return;
+    }
+    last_poll_ms = millis();
+
+    bool current_power = last_known_power;
+    if (!tuyaReadPower(current_power)) {
+      Serial.println("Periodic Tuya status poll failed.");
+      return;
+    }
+
+    if (current_power != power->getVal<bool>()) {
+      Serial.print("External light state changed to ");
+      Serial.println(current_power ? "ON" : "OFF");
+      power->setVal(current_power);
+    }
+    last_known_power = current_power;
+  }
+};
+
+struct HomeKitTuyaSwitch : Service::Switch {
+  SpanCharacteristic* power;
+  unsigned long last_poll_ms = 0;
+  bool last_known_power = false;
+
+  HomeKitTuyaSwitch() : Service::Switch() {
+    bool initial_power = false;
+    if (tuyaReadPower(initial_power)) {
+      last_known_power = initial_power;
+    }
+    power = new Characteristic::On(last_known_power);
+  }
+
+  boolean update() override {
+    if (!power->updated()) {
+      return true;
+    }
+
+    const bool requested_power = power->getNewVal<bool>();
+    Serial.print("HomeKit requested switch ");
+    Serial.println(requested_power ? "ON" : "OFF");
+
+    if (!tuyaSwitch(requested_power)) {
+      Serial.println("Tuya command failed; rejecting HomeKit update.");
+      return false;
+    }
+
+    last_known_power = requested_power;
+    last_poll_ms = millis();
+    return true;
+  }
+
+  void loop() override {
+    const uint32_t poll_interval_ms =
+        normalizedPollInterval(config.poll_interval_seconds) * 1000;
+    if (millis() - last_poll_ms < poll_interval_ms) {
+      return;
+    }
+    last_poll_ms = millis();
+
+    bool current_power = last_known_power;
+    if (!tuyaReadPower(current_power)) {
+      Serial.println("Periodic Tuya status poll failed.");
+      return;
+    }
+
+    if (current_power != power->getVal<bool>()) {
+      Serial.print("External switch state changed to ");
+      Serial.println(current_power ? "ON" : "OFF");
+      power->setVal(current_power);
+    }
+    last_known_power = current_power;
+  }
+};
+
 }  // namespace
 
 void setup() {
@@ -1142,8 +1393,16 @@ void setup() {
 
   homeSpan.setWifiCredentials(config.wifi_ssid.c_str(),
                               config.wifi_password.c_str());
+  if (!config.homekit_pairing_code.isEmpty()) {
+    Serial.print("Setting HomeKit pairing code: ");
+    Serial.println(formattedHomeKitCode(config.homekit_pairing_code));
+    homeSpan.setPairingCode(config.homekit_pairing_code.c_str(), false);
+    clearPendingHomeKitPairingCode();
+  } else {
+    Serial.println("HomeKit pairing code: use saved HomeSpan code, or default 466-37-726 if never changed.");
+  }
   homeSpan.setLogLevel(1);
-  homeSpan.begin(Category::Outlets, config.homekit_accessory_name.c_str());
+  homeSpan.begin(homeKitCategory(), config.homekit_accessory_name.c_str());
 
   new SpanAccessory();
   new Service::AccessoryInformation();
@@ -1153,12 +1412,20 @@ void setup() {
   new Characteristic::Model(config.homekit_model.c_str());
   new Characteristic::SerialNumber(config.tuya_device_id.c_str());
   new Characteristic::FirmwareRevision("0.2.0");
-  new HomeKitTuyaOutlet();
+  if (config.homekit_service_type == "light") {
+    new HomeKitTuyaLight();
+  } else if (config.homekit_service_type == "switch") {
+    new HomeKitTuyaSwitch();
+  } else {
+    new HomeKitTuyaOutlet();
+  }
   homekit_started = true;
+  startAdminServer();
 }
 
 void loop() {
   if (setup_mode) {
+    active_server = &setup_server;
     setup_server.handleClient();
     maybeRetrySavedWiFiFromSetup();
     return;
@@ -1172,5 +1439,7 @@ void loop() {
     time_sync_started = true;
     syncTime();
   }
+  active_server = &admin_server;
+  admin_server.handleClient();
   homeSpan.poll();
 }
