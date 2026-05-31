@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-- Start v2.1 Smart Setup & Diagnostics development.
+- Nothing yet.
+
+## v2.1 - Smart Setup & Diagnostics
+
 - Modernize setup into a mobile-friendly step-based wizard.
 - Add experimental LAN scan for possible Tuya devices on ports `6668` and `6669`.
 - Add structured Tuya connection diagnostics with latency, port, authentication, relay DPS and suggestion details.
