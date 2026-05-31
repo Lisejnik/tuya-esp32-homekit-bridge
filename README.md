@@ -368,9 +368,10 @@ Status LED:
 
 - setup mode: fast blink
 - after Wi-Fi connects successfully: 10 slow blinks, then off
-- normal running: off
+- normal running, paired with HomeKit, no current error: steady dim light around 1% brightness
+- Wi-Fi disconnected or Tuya plug not responding: dim SOS blink pattern
 
-The default status LED pin is `GPIO2`, which matches many ESP32 Dev Module boards. If your board uses another LED pin, change `STATUS_LED_PIN` in the sketch.
+The default status LED pin is `GPIO2`, which matches many ESP32 Dev Module boards. If your board uses another LED pin, change `STATUS_LED_PIN` in the sketch. If the built-in LED is wired differently, adjust `STATUS_LED_ON`.
 
 The HomeSpan sketch no longer requires `esp32/homespan_tuya_outlet/secrets.h`. Secrets are stored in ESP32 flash memory through the setup wizard and must still never be committed or shared.
 

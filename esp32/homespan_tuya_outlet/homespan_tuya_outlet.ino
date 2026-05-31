@@ -22,6 +22,10 @@ constexpr uint8_t RESET_CONFIG_PIN = 0;
 constexpr uint8_t STATUS_LED_PIN = 2;
 constexpr uint8_t STATUS_LED_ON = HIGH;
 constexpr uint8_t STATUS_LED_OFF = LOW;
+constexpr uint32_t STATUS_LED_PWM_HZ = 5000;
+constexpr uint8_t STATUS_LED_PWM_BITS = 8;
+constexpr uint8_t STATUS_LED_FULL_DUTY = 255;
+constexpr uint8_t STATUS_LED_DIM_DUTY = 3;
 constexpr uint8_t WIFI_CONNECT_ATTEMPTS = 3;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t SETUP_WIFI_RETRY_INTERVAL_MS = 60000;
@@ -85,15 +89,32 @@ bool homekit_started = false;
 bool setup_retry_saved_wifi = false;
 bool reset_button_was_pressed = false;
 bool factory_reset_started = false;
+bool homekit_paired = false;
+bool tuya_error = false;
 bool setup_led_state = false;
 unsigned long last_setup_wifi_retry_ms = 0;
 unsigned long reset_button_pressed_ms = 0;
 unsigned long last_setup_led_toggle_ms = 0;
+unsigned long last_status_led_update_ms = 0;
+uint8_t sos_step = 0;
+bool sos_led_on = false;
 
 String setup_ap_password;
 
+void writeStatusLedDuty(uint8_t duty) {
+  if (STATUS_LED_ON == HIGH) {
+    ledcWrite(STATUS_LED_PIN, duty);
+  } else {
+    ledcWrite(STATUS_LED_PIN, STATUS_LED_FULL_DUTY - duty);
+  }
+}
+
 void setStatusLed(bool on) {
-  digitalWrite(STATUS_LED_PIN, on ? STATUS_LED_ON : STATUS_LED_OFF);
+  writeStatusLedDuty(on ? STATUS_LED_FULL_DUTY : 0);
+}
+
+void setDimStatusLed(bool on) {
+  writeStatusLedDuty(on ? STATUS_LED_DIM_DUTY : 0);
 }
 
 void updateSetupLed() {
@@ -105,6 +126,39 @@ void updateSetupLed() {
   setStatusLed(setup_led_state);
 }
 
+void resetSosLed() {
+  sos_step = 0;
+  sos_led_on = false;
+  last_status_led_update_ms = 0;
+}
+
+void updateSosLed() {
+  static const uint16_t durations_ms[] = {
+      200, 200, 200, 200, 200, 600,
+      600, 200, 600, 200, 600, 600,
+      200, 200, 200, 200, 200, 1600,
+  };
+  const unsigned long now = millis();
+  if (last_status_led_update_ms != 0 &&
+      now - last_status_led_update_ms < durations_ms[sos_step]) {
+    return;
+  }
+  last_status_led_update_ms = now;
+  sos_led_on = !sos_led_on;
+  setDimStatusLed(sos_led_on);
+  sos_step = (sos_step + 1) % (sizeof(durations_ms) / sizeof(durations_ms[0]));
+}
+
+void updateNormalStatusLed() {
+  const bool wifi_error = WiFi.status() != WL_CONNECTED;
+  if (wifi_error || tuya_error) {
+    updateSosLed();
+    return;
+  }
+  resetSosLed();
+  setDimStatusLed(homekit_paired);
+}
+
 void blinkWiFiConnectedLed() {
   Serial.println("Wi-Fi connected; blinking status LED 10 times.");
   for (uint8_t i = 0; i < WIFI_CONNECTED_BLINKS; i++) {
@@ -113,6 +167,35 @@ void blinkWiFiConnectedLed() {
     setStatusLed(false);
     delay(WIFI_CONNECTED_LED_OFF_MS);
   }
+}
+
+void setTuyaError(bool error) {
+  if (tuya_error == error) {
+    return;
+  }
+  tuya_error = error;
+  Serial.print("Tuya status LED error state: ");
+  Serial.println(tuya_error ? "ON" : "OFF");
+  resetSosLed();
+}
+
+void refreshHomeKitPairingState() {
+  const bool paired =
+      homeSpan.controllerListBegin() != homeSpan.controllerListEnd();
+  if (homekit_paired == paired) {
+    return;
+  }
+  homekit_paired = paired;
+  Serial.print("HomeKit paired state: ");
+  Serial.println(homekit_paired ? "paired" : "not paired");
+  resetSosLed();
+}
+
+void handleHomeKitPairingChange(boolean paired) {
+  homekit_paired = paired;
+  Serial.print("HomeKit pairing changed: ");
+  Serial.println(homekit_paired ? "paired" : "not paired");
+  resetSosLed();
 }
 
 void appendU32(std::vector<uint8_t>& out, uint32_t value) {
@@ -819,6 +902,7 @@ void printClearPayload(const std::vector<uint8_t>& payload) {
 
 bool tuyaStatus() {
   if (!ensureSession()) {
+    setTuyaError(true);
     return false;
   }
   const char payload[] = "{}";
@@ -827,21 +911,25 @@ bool tuyaStatus() {
                      strlen(payload), session_key, false, &response)) {
     Serial.println("Status command failed.");
     resetTuyaSession();
+    setTuyaError(true);
     return false;
   }
   std::vector<uint8_t> clear;
   if (!decryptPayload(session_key, response, clear)) {
     Serial.println("Could not decrypt status response.");
     resetTuyaSession();
+    setTuyaError(true);
     return false;
   }
   printClearPayload(clear);
   resetTuyaSession();
+  setTuyaError(false);
   return true;
 }
 
 bool tuyaReadPower(bool& is_on) {
   if (!ensureSession()) {
+    setTuyaError(true);
     return false;
   }
   const char payload[] = "{}";
@@ -850,6 +938,7 @@ bool tuyaReadPower(bool& is_on) {
                      strlen(payload), session_key, false, &response)) {
     Serial.println("Status command failed.");
     resetTuyaSession();
+    setTuyaError(true);
     return false;
   }
 
@@ -857,6 +946,7 @@ bool tuyaReadPower(bool& is_on) {
   if (!decryptPayload(session_key, response, clear)) {
     Serial.println("Could not decrypt status response.");
     resetTuyaSession();
+    setTuyaError(true);
     return false;
   }
 
@@ -867,22 +957,26 @@ bool tuyaReadPower(bool& is_on) {
   if (text.indexOf(true_pattern) >= 0) {
     is_on = true;
     resetTuyaSession();
+    setTuyaError(false);
     return true;
   }
   if (text.indexOf(false_pattern) >= 0) {
     is_on = false;
     resetTuyaSession();
+    setTuyaError(false);
     return true;
   }
 
   Serial.println("Relay DPS was not found in status response.");
   printClearPayload(clear);
   resetTuyaSession();
+  setTuyaError(true);
   return false;
 }
 
 bool tuyaSwitch(bool on) {
   if (!ensureSession()) {
+    setTuyaError(true);
     return false;
   }
   time_t now = time(nullptr);
@@ -898,6 +992,7 @@ bool tuyaSwitch(bool on) {
   if (payload_len < 0 || size_t(payload_len) >= sizeof(payload)) {
     Serial.println("Tuya switch payload was too long.");
     resetTuyaSession();
+    setTuyaError(true);
     return false;
   }
 
@@ -908,6 +1003,7 @@ bool tuyaSwitch(bool on) {
                      strlen(payload), session_key, true, &response)) {
     Serial.println("Switch command failed.");
     resetTuyaSession();
+    setTuyaError(true);
     return false;
   }
 
@@ -915,12 +1011,14 @@ bool tuyaSwitch(bool on) {
   if (response.payload.empty()) {
     Serial.println("Switch command acknowledged with empty payload.");
     resetTuyaSession();
+    setTuyaError(false);
     return true;
   }
   if (decryptPayload(session_key, response, clear)) {
     printClearPayload(clear);
   }
   resetTuyaSession();
+  setTuyaError(false);
   return true;
 }
 
@@ -1451,7 +1549,7 @@ void setup() {
   Serial.println("ESP32 HomeSpan Tuya Outlet");
 
   pinMode(RESET_CONFIG_PIN, INPUT_PULLUP);
-  pinMode(STATUS_LED_PIN, OUTPUT);
+  ledcAttach(STATUS_LED_PIN, STATUS_LED_PWM_HZ, STATUS_LED_PWM_BITS);
   setStatusLed(false);
   if (digitalRead(RESET_CONFIG_PIN) == LOW) {
     clearConfig();
@@ -1486,7 +1584,10 @@ void setup() {
     Serial.println("HomeKit pairing code: use saved HomeSpan code, or default 466-37-726 if never changed.");
   }
   homeSpan.setLogLevel(1);
+  homeSpan.setPairCallback(handleHomeKitPairingChange);
+  homeSpan.setControllerCallback(refreshHomeKitPairingState);
   homeSpan.begin(homeKitCategory(), config.homekit_accessory_name.c_str());
+  refreshHomeKitPairingState();
 
   new SpanAccessory();
   new Service::AccessoryInformation();
@@ -1528,4 +1629,6 @@ void loop() {
   active_server = &admin_server;
   admin_server.handleClient();
   homeSpan.poll();
+  refreshHomeKitPairingState();
+  updateNormalStatusLed();
 }

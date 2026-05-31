@@ -311,7 +311,8 @@ Status LED:
 
 - During setup mode, the ESP32 LED blinks quickly.
 - After Wi-Fi connects successfully, the LED blinks slowly 10 times and then turns off.
-- During normal running, the LED stays off.
+- During normal running, after successful HomeKit pairing, the LED glows very dimly.
+- If Wi-Fi disconnects or the Tuya plug does not respond, the LED blinks a dim SOS pattern.
 
 The default status LED pin is `GPIO2`, which matches many ESP32 Dev Module boards. Some boards do not have a built-in LED or use a different pin.
 

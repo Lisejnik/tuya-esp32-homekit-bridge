@@ -64,9 +64,10 @@ Holding BOOT while the ESP32 starts still forces setup mode by clearing bridge c
 
 - Setup mode: fast blink.
 - Wi-Fi connected successfully: 10 slow blinks, then off.
-- Normal running: off.
+- Normal running, paired with HomeKit, no current error: steady dim light around 1% brightness.
+- Wi-Fi disconnected or Tuya plug not responding: dim SOS blink pattern.
 
-The default status LED pin is `GPIO2`, which matches many ESP32 Dev Module boards. If your board uses another LED pin, change `STATUS_LED_PIN` in the sketch.
+The default status LED pin is `GPIO2`, which matches many ESP32 Dev Module boards. If your board uses another LED pin, change `STATUS_LED_PIN` in the sketch. If the built-in LED is wired differently, adjust `STATUS_LED_ON`.
 
 ## Arduino IDE Setup
 
