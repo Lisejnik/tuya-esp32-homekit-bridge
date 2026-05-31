@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <DNSServer.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -16,8 +18,10 @@ namespace {
 constexpr uint16_t TUYA_PORT = 6668;
 constexpr uint16_t TUYA_ALT_PORT = 6669;
 constexpr uint16_t ADMIN_PORT = 8080;
+constexpr uint16_t DNS_PORT = 53;
 constexpr char SETUP_AP_SSID[] = "TuyaHomeKit-Setup";
 constexpr char SETUP_AP_PASSWORD_PREFIX[] = "THK";
+constexpr char DEFAULT_HOSTNAME[] = "tuya-homekit";
 constexpr char PREF_NAMESPACE[] = "tuya-hk";
 constexpr uint8_t RESET_CONFIG_PIN = 0;
 constexpr uint8_t STATUS_LED_PIN = 2;
@@ -67,6 +71,7 @@ struct BridgeConfig {
   String homekit_pairing_code;
   String homekit_manufacturer = "Tuya Local Bridge";
   String homekit_model = "Tuya Plug via ESP32";
+  String device_hostname = DEFAULT_HOSTNAME;
   uint32_t poll_interval_seconds = DEFAULT_POLL_INTERVAL_SECONDS;
 };
 
@@ -114,6 +119,7 @@ Preferences preferences;
 WebServer setup_server(80);
 WebServer admin_server(ADMIN_PORT);
 WebServer* active_server = &setup_server;
+DNSServer dns_server;
 WiFiClient client;
 uint32_t sequence_number = 1;
 uint8_t real_key[AES_BLOCK_SIZE] = {0};
@@ -133,6 +139,8 @@ unsigned long last_setup_led_toggle_ms = 0;
 unsigned long last_status_led_update_ms = 0;
 uint8_t sos_step = 0;
 bool sos_led_on = false;
+bool captive_dns_started = false;
+bool mdns_started = false;
 
 String setup_ap_password;
 RuntimeStatus runtime_status;
@@ -141,6 +149,7 @@ uint8_t diagnostic_log_start = 0;
 uint8_t diagnostic_log_count = 0;
 
 bool connectConfiguredWiFi(const BridgeConfig& candidate, bool keep_ap);
+String setupPage(const String& message);
 
 void addDiagnosticLog(const String& event) {
   const uint8_t index =
@@ -406,6 +415,19 @@ String homeKitServiceLabel() {
   return "Outlet";
 }
 
+String localDashboardUrl() {
+  return String("http://") + config.device_hostname + ".local:" +
+         String(ADMIN_PORT) + "/";
+}
+
+String ipDashboardUrl() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return "";
+  }
+  return String("http://") + WiFi.localIP().toString() + ":" +
+         String(ADMIN_PORT) + "/";
+}
+
 String formatDuration(unsigned long seconds) {
   const unsigned long days = seconds / 86400;
   seconds %= 86400;
@@ -529,6 +551,51 @@ bool isAlphaNumericString(const String& value) {
   return true;
 }
 
+String normalizedHostname(String value) {
+  value.trim();
+  value.toLowerCase();
+  String out;
+  out.reserve(value.length());
+  bool last_dash = false;
+  for (size_t i = 0; i < value.length(); i++) {
+    const char ch = value.charAt(i);
+    const bool allowed = isAlphaNumeric(ch) || ch == '-';
+    if (!allowed) {
+      continue;
+    }
+    if (ch == '-') {
+      if (out.isEmpty() || last_dash) {
+        continue;
+      }
+      last_dash = true;
+    } else {
+      last_dash = false;
+    }
+    out += ch;
+  }
+  while (out.endsWith("-")) {
+    out.remove(out.length() - 1);
+  }
+  if (out.isEmpty()) {
+    out = DEFAULT_HOSTNAME;
+  }
+  return out;
+}
+
+bool isHostnameValid(const String& hostname) {
+  if (hostname.isEmpty() || hostname.length() > 32 ||
+      hostname.startsWith("-") || hostname.endsWith("-")) {
+    return false;
+  }
+  for (size_t i = 0; i < hostname.length(); i++) {
+    const char ch = hostname.charAt(i);
+    if (!isAlphaNumeric(ch) && ch != '-') {
+      return false;
+    }
+  }
+  return true;
+}
+
 String setupPasswordFromRandom() {
   char password[16] = {0};
   snprintf(password, sizeof(password), "%s%08lX%02lX",
@@ -539,6 +606,10 @@ String setupPasswordFromRandom() {
 
 bool validateConfig(const BridgeConfig& candidate, String& error) {
   IPAddress ip;
+  if (!isHostnameValid(candidate.device_hostname)) {
+    error = "Hostname must be 1-32 characters using only letters, numbers, and hyphens. It cannot start or end with a hyphen.";
+    return false;
+  }
   if (candidate.wifi_ssid.isEmpty()) {
     error = "Wi-Fi SSID is required.";
     return false;
@@ -629,6 +700,8 @@ bool loadConfig() {
       preferences.getString("hk_mfr", "Tuya Local Bridge");
   config.homekit_model =
       preferences.getString("hk_model", "Tuya Plug via ESP32");
+  config.device_hostname =
+      normalizedHostname(preferences.getString("hostname", DEFAULT_HOSTNAME));
   config.poll_interval_seconds =
       normalizedPollInterval(preferences.getUInt("poll_sec",
                                                  DEFAULT_POLL_INTERVAL_SECONDS));
@@ -645,6 +718,7 @@ bool loadConfig() {
 
 bool saveConfig(const BridgeConfig& candidate, String& error) {
   BridgeConfig normalized = candidate;
+  normalized.device_hostname = normalizedHostname(normalized.device_hostname);
   normalized.poll_interval_seconds =
       normalizedPollInterval(normalized.poll_interval_seconds);
   if (!validateConfig(normalized, error)) {
@@ -665,10 +739,11 @@ bool saveConfig(const BridgeConfig& candidate, String& error) {
   preferences.putString("hk_name", normalized.homekit_accessory_name);
   preferences.putString("hk_service", normalized.homekit_service_type);
   if (!normalized.homekit_pairing_code.isEmpty()) {
-    preferences.putString("hk_pair", normalized.homekit_pairing_code);
+  preferences.putString("hk_pair", normalized.homekit_pairing_code);
   }
   preferences.putString("hk_mfr", normalized.homekit_manufacturer);
   preferences.putString("hk_model", normalized.homekit_model);
+  preferences.putString("hostname", normalized.device_hostname);
   preferences.putUInt("poll_sec", normalized.poll_interval_seconds);
   preferences.putBool("configured", true);
   preferences.end();
@@ -700,6 +775,8 @@ BridgeConfig configFromRequest() {
   candidate.homekit_pairing_code = active_server->arg("homekit_pairing_code");
   candidate.homekit_manufacturer = "Tuya Local Bridge";
   candidate.homekit_model = "Tuya Plug via ESP32";
+  candidate.device_hostname =
+      normalizedHostname(active_server->arg("device_hostname"));
   candidate.poll_interval_seconds =
       uint32_t(active_server->arg("poll_interval_seconds").toInt());
   if (candidate.wifi_password.isEmpty() && !config.wifi_password.isEmpty()) {
@@ -719,6 +796,9 @@ BridgeConfig configFromRequest() {
   }
   if (candidate.homekit_service_type.isEmpty()) {
     candidate.homekit_service_type = "outlet";
+  }
+  if (candidate.device_hostname.isEmpty()) {
+    candidate.device_hostname = DEFAULT_HOSTNAME;
   }
   if (candidate.poll_interval_seconds == 0) {
     candidate.poll_interval_seconds = DEFAULT_POLL_INTERVAL_SECONDS;
@@ -1442,11 +1522,68 @@ String lanScanHtml(const BridgeConfig& candidate) {
   return html;
 }
 
+bool startMdnsResponder() {
+  if (mdns_started) {
+    return true;
+  }
+  if (config.device_hostname.isEmpty()) {
+    config.device_hostname = DEFAULT_HOSTNAME;
+  }
+  if (!MDNS.begin(config.device_hostname.c_str())) {
+    Serial.print("mDNS failed for hostname: ");
+    Serial.println(config.device_hostname);
+    addDiagnosticLog("mDNS failed: " + config.device_hostname);
+    return false;
+  }
+  MDNS.addService("http", "tcp", ADMIN_PORT);
+  MDNS.addServiceTxt("http", "tcp", "path", "/");
+  MDNS.addServiceTxt("http", "tcp", "name", config.homekit_accessory_name);
+  mdns_started = true;
+  Serial.print("mDNS URL: ");
+  Serial.println(localDashboardUrl());
+  addDiagnosticLog("mDNS started: " + localDashboardUrl());
+  return true;
+}
+
+String appIconSvg() {
+  return F("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\"><rect width=\"512\" height=\"512\" rx=\"96\" fill=\"#f6f8fa\"/><path d=\"M156 360V226l100-82 100 82v134\" fill=\"none\" stroke=\"#00a6a6\" stroke-width=\"28\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M132 378h248\" stroke=\"#14212b\" stroke-width=\"32\" stroke-linecap=\"round\"/><path d=\"M256 216v74\" stroke=\"#00a6a6\" stroke-width=\"28\" stroke-linecap=\"round\"/><path d=\"M218 270a56 56 0 1 0 76 0\" fill=\"none\" stroke=\"#00a6a6\" stroke-width=\"28\" stroke-linecap=\"round\"/><path d=\"M148 174V92h216v82\" fill=\"none\" stroke=\"#14212b\" stroke-width=\"28\" stroke-linejoin=\"round\"/><path d=\"M108 176h48M108 236h48M108 296h48M356 176h48M356 236h48M356 296h48\" stroke=\"#14212b\" stroke-width=\"24\" stroke-linecap=\"round\"/></svg>");
+}
+
+String webManifestJson() {
+  String json;
+  json.reserve(700);
+  json += F("{\"name\":\"Tuya HomeKit Bridge\",\"short_name\":\"Tuya Bridge\",");
+  json += F("\"description\":\"Local ESP32 dashboard for Tuya HomeKit Bridge\",");
+  json += F("\"start_url\":\"/\",\"scope\":\"/\",\"display\":\"standalone\",");
+  json += F("\"background_color\":\"#f6f8fa\",\"theme_color\":\"#008b8b\",");
+  json += F("\"icons\":[{\"src\":\"/icon.svg\",\"sizes\":\"any\",\"type\":\"image/svg+xml\",\"purpose\":\"any maskable\"}],");
+  json += F("\"shortcuts\":[{\"name\":\"Dashboard\",\"url\":\"/\",\"description\":\"Open local dashboard\"}]}");
+  return json;
+}
+
+void handleManifest() {
+  requestServer().send(200, "application/manifest+json", webManifestJson());
+}
+
+void handleIcon() {
+  requestServer().send(200, "image/svg+xml", appIconSvg());
+}
+
+void handleCaptivePortalProbe() {
+  requestServer().sendHeader("Cache-Control", "no-store");
+  requestServer().send(200, "text/html", setupPage(""));
+}
+
 String setupPage(const String& message) {
   String page;
   page.reserve(30000);
   page += F("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
   page += F("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+  page += F("<meta name=\"theme-color\" content=\"#008b8b\">");
+  page += F("<meta name=\"apple-mobile-web-app-capable\" content=\"yes\">");
+  page += F("<meta name=\"apple-mobile-web-app-title\" content=\"Tuya Bridge\">");
+  page += F("<link rel=\"manifest\" href=\"/manifest.webmanifest\">");
+  page += F("<link rel=\"icon\" href=\"/icon.svg\" type=\"image/svg+xml\">");
   page += F("<title>Tuya HomeKit Bridge</title><style>");
   page += F(":root{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#14212b;background:#f6f8fa;line-height:1.45}");
   page += F("body{margin:0;padding:18px}.wrap{max-width:980px;margin:0 auto}.panel{background:white;border:1px solid #d8dee4;border-radius:8px;padding:20px;margin:0 0 16px}");
@@ -1488,6 +1625,8 @@ String setupPage(const String& message) {
     page += F("</table></div><div><h2>Network</h2><table>");
     addMetricRow(page, "Wi-Fi SSID", WiFi.SSID());
     addMetricRow(page, "ESP32 IP address", WiFi.localIP().toString());
+    addMetricRow(page, "Local hostname", config.device_hostname + ".local");
+    addMetricRow(page, "Dashboard URL", localDashboardUrl());
     addMetricRow(page, "RSSI", String(WiFi.RSSI()) + " dBm");
     addMetricRow(page, "Uptime", formatDuration(millis() / 1000));
     addMetricRow(page, "Free heap", String(ESP.getFreeHeap()) + " bytes");
@@ -1508,6 +1647,20 @@ String setupPage(const String& message) {
       }
     }
     page += F("</div>");
+    page += F("<div class=\"result-card\"><h3>Management URL</h3><p class=\"help\">Use this bookmark after setup instead of searching for the ESP32 IP address.</p><p><a href=\"");
+    page += htmlEscape(localDashboardUrl());
+    page += F("\">");
+    page += htmlEscape(localDashboardUrl());
+    page += F("</a></p>");
+    const String ip_url = ipDashboardUrl();
+    if (!ip_url.isEmpty()) {
+      page += F("<p class=\"help\">Fallback IP URL: <a href=\"");
+      page += htmlEscape(ip_url);
+      page += F("\">");
+      page += htmlEscape(ip_url);
+      page += F("</a></p>");
+    }
+    page += F("</div>");
   }
   page += F("</section><section class=\"panel\"><h2>");
   page += homekit_started ? F("Edit configuration") : F("Setup wizard");
@@ -1520,6 +1673,13 @@ String setupPage(const String& message) {
   page += F("\"><span class=\"help\">Name of your home, IoT, or guest Wi-Fi network.</span></label>");
   page += F("<label>Wi-Fi password<input name=\"wifi_password\" type=\"password\" value=\"");
   page += F("\" placeholder=\"Leave blank to keep saved password\"><span class=\"help\">Leave blank when editing if the saved Wi-Fi password should stay unchanged.</span></label>");
+  page += F("<label>Local dashboard hostname<input name=\"device_hostname\" required maxlength=\"32\" pattern=\"[a-zA-Z0-9-]{1,32}\" value=\"");
+  page += htmlEscape(config.device_hostname);
+  page += F("\"><span class=\"help\">Bookmark http://");
+  page += htmlEscape(config.device_hostname);
+  page += F(".local:");
+  page += String(ADMIN_PORT);
+  page += F("/ after setup. Default is tuya-homekit.local. Use only letters, numbers, and hyphens.</span></label>");
   page += F("</div></div>");
 
   page += F("<div class=\"step\" data-step=\"1\"><p class=\"help\">Experimental LAN scan checks common Tuya ports on the ESP32 subnet. Results are only candidates.</p><div class=\"actions\"><button class=\"secondary\" type=\"button\" id=\"scan\">Find Tuya devices</button></div><div id=\"scanResult\"></div>");
@@ -1572,7 +1732,9 @@ String setupPage(const String& message) {
   }
   page += F("</div></form><p class=\"help\">Setup AP: ");
   page += SETUP_AP_SSID;
-  page += F(" · In setup mode open http://192.168.4.1/ · In normal mode open the ESP32 IP with port ");
+  page += F(" · In setup mode open http://192.168.4.1/ if the captive portal does not appear automatically · In normal mode open ");
+  page += htmlEscape(localDashboardUrl());
+  page += F(" or the ESP32 IP with port ");
   page += String(ADMIN_PORT);
   page += F(".</p></section>");
   page += F("<script>");
@@ -1594,6 +1756,7 @@ String setupPage(const String& message) {
 
 bool connectConfiguredWiFi(const BridgeConfig& candidate, bool keep_ap) {
   WiFi.mode(keep_ap ? WIFI_AP_STA : WIFI_STA);
+  WiFi.setHostname(candidate.device_hostname.c_str());
   WiFi.begin(candidate.wifi_ssid.c_str(), candidate.wifi_password.c_str());
   Serial.print("Connecting to Wi-Fi");
   const unsigned long start = millis();
@@ -1858,8 +2021,19 @@ void startSetupMode(const String& reason, bool retry_saved_wifi = false) {
   Serial.println(setup_ap_password);
   Serial.print("Setup URL: http://");
   Serial.println(WiFi.softAPIP());
+  captive_dns_started = dns_server.start(DNS_PORT, "*", WiFi.softAPIP());
+  Serial.print("Captive portal DNS: ");
+  Serial.println(captive_dns_started ? "started" : "failed");
 
   setup_server.on("/", HTTP_GET, handleSetupRoot);
+  setup_server.on("/manifest.webmanifest", HTTP_GET, handleManifest);
+  setup_server.on("/icon.svg", HTTP_GET, handleIcon);
+  setup_server.on("/generate_204", HTTP_GET, handleCaptivePortalProbe);
+  setup_server.on("/gen_204", HTTP_GET, handleCaptivePortalProbe);
+  setup_server.on("/hotspot-detect.html", HTTP_GET, handleCaptivePortalProbe);
+  setup_server.on("/library/test/success.html", HTTP_GET, handleCaptivePortalProbe);
+  setup_server.on("/connecttest.txt", HTTP_GET, handleCaptivePortalProbe);
+  setup_server.on("/fwlink", HTTP_GET, handleCaptivePortalProbe);
   setup_server.on("/save", HTTP_POST, handleSaveConfig);
   setup_server.on("/reset", HTTP_POST, handleResetConfig);
   setup_server.on("/test", HTTP_POST, handleTestConfig);
@@ -1874,6 +2048,8 @@ void startSetupMode(const String& reason, bool retry_saved_wifi = false) {
 
 void startAdminServer() {
   admin_server.on("/", HTTP_GET, handleSetupRoot);
+  admin_server.on("/manifest.webmanifest", HTTP_GET, handleManifest);
+  admin_server.on("/icon.svg", HTTP_GET, handleIcon);
   admin_server.on("/save", HTTP_POST, handleSaveConfig);
   admin_server.on("/reset", HTTP_POST, handleResetConfig);
   admin_server.on("/test", HTTP_POST, handleTestConfig);
@@ -1887,6 +2063,8 @@ void startAdminServer() {
   Serial.print(WiFi.localIP());
   Serial.print(":");
   Serial.println(ADMIN_PORT);
+  Serial.print("Friendly admin URL: ");
+  Serial.println(localDashboardUrl());
   addDiagnosticLog("Admin dashboard started");
 }
 
@@ -2156,6 +2334,7 @@ void setup() {
     return;
   }
   blinkWiFiConnectedLed();
+  startMdnsResponder();
 
   homeSpan.setWifiCredentials(config.wifi_ssid.c_str(),
                               config.wifi_password.c_str());
@@ -2181,7 +2360,7 @@ void setup() {
   new Characteristic::Manufacturer(config.homekit_manufacturer.c_str());
   new Characteristic::Model(config.homekit_model.c_str());
   new Characteristic::SerialNumber(config.tuya_device_id.c_str());
-  new Characteristic::FirmwareRevision("2.1.0");
+  new Characteristic::FirmwareRevision("2.2.0");
   if (config.homekit_service_type == "light") {
     new HomeKitTuyaLight();
   } else if (config.homekit_service_type == "switch") {
@@ -2197,6 +2376,9 @@ void loop() {
   handleResetButton();
   if (setup_mode) {
     active_server = &setup_server;
+    if (captive_dns_started) {
+      dns_server.processNextRequest();
+    }
     setup_server.handleClient();
     updateSetupLed();
     maybeRetrySavedWiFiFromSetup();

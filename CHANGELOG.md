@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-- Nothing yet.
+- Add configurable local dashboard hostname, default `tuya-homekit`.
+- Advertise the admin dashboard with mDNS at `http://tuya-homekit.local:8080/`.
+- Show the friendly dashboard management URL in the web UI and Serial Monitor.
+- Add PWA manifest and local SVG icon endpoints for adding the dashboard to a phone home screen.
+- Improve setup captive portal behavior with wildcard DNS and common OS captive-portal probe routes.
 
 ## v2.1 - Smart Setup & Diagnostics
 

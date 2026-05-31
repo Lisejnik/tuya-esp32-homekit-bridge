@@ -34,7 +34,7 @@ For maintainers preparing a GitHub release, use:
 
 ## Current Status
 
-Current development branch: `v2.1 Smart Setup & Diagnostics`.
+Current release: `v2.1 Smart Setup & Diagnostics`.
 
 - tested with one Tesla Smart Plug / Tuya protocol `3.4`
 - local Python control works through TinyTuya
@@ -43,6 +43,7 @@ Current development branch: `v2.1 Smart Setup & Diagnostics`.
 - HomeSpan sketch has a step-based setup web wizard, so users no longer need to edit source code for normal setup
 - admin dashboard shows HomeKit, Tuya, network and diagnostics status after the ESP32 joins Wi-Fi
 - experimental LAN scan and read-only DPS inspector are available from the web UI
+- next development step adds friendly local access so users can open the dashboard at `http://tuya-homekit.local:8080/` instead of finding the ESP32 IP address
 
 This is still experimental. Treat the project as a working reference build for one known device, not as a universal Tuya bridge.
 
@@ -85,11 +86,25 @@ The v2.1 wizard is step-based:
 
 The wizard still supports manual entry for Wi-Fi SSID/password, Tuya IP, device ID, local key, protocol version, relay DPS, HomeKit name/type/pairing code, and polling interval.
 
-After normal boot, Serial Monitor prints a local admin URL, for example:
+The wizard also supports a local dashboard hostname. The default is:
+
+```text
+tuya-homekit
+```
+
+After normal boot, the ESP32 advertises the admin dashboard with mDNS. In normal home Wi-Fi use, open:
+
+```text
+http://tuya-homekit.local:8080/
+```
+
+If your router or client does not support mDNS, Serial Monitor still prints a fallback IP URL, for example:
 
 ```text
 Admin URL: http://192.168.1.50:8080
 ```
+
+The setup access point also runs a small captive portal helper. Most phones and computers should offer the setup page automatically after joining `TuyaHomeKit-Setup`; if not, open `http://192.168.4.1/` manually.
 
 The dashboard shows:
 
@@ -105,6 +120,8 @@ Available dashboard actions:
 - Restart ESP32
 - Reset configuration
 - Reset HomeKit pairing
+
+The dashboard includes a PWA manifest and local icon endpoint, so phones can add the dashboard bookmark to the home screen. This is still a local web dashboard, not a native app.
 
 ### Experimental LAN Scan
 

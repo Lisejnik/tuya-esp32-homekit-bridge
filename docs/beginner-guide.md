@@ -265,10 +265,13 @@ Then open:
 http://192.168.4.1/
 ```
 
+Most phones and computers should offer the setup page automatically after joining `TuyaHomeKit-Setup`. If the captive portal window does not appear, open the address above manually.
+
 Fill the setup form:
 
 - Wi-Fi SSID
 - Wi-Fi password
+- local dashboard hostname: `tuya-homekit`
 - Tuya plug IP address
 - Tuya device ID
 - Tuya local key
@@ -304,7 +307,15 @@ After restart, the ESP32 should connect to your normal Wi-Fi and start HomeSpan.
 
 If it cannot connect to Wi-Fi, it will return to setup mode.
 
-When the ESP32 starts normally, Serial Monitor prints an admin URL like:
+When the ESP32 starts normally, open the friendly local dashboard URL:
+
+```text
+http://tuya-homekit.local:8080/
+```
+
+If you changed the hostname in setup, replace `tuya-homekit` with your chosen hostname.
+
+Serial Monitor also prints a fallback IP URL like:
 
 ```text
 Admin URL: http://192.168.1.50:8080
@@ -316,8 +327,10 @@ The dashboard also shows current HomeKit, Tuya and network status:
 
 - HomeKit name, type, relay state and polling interval
 - Tuya IP, protocol, relay DPS, last response, latency and failed poll count
-- Wi-Fi SSID, ESP32 IP, signal strength, uptime and free heap
+- Wi-Fi SSID, ESP32 IP, local hostname, dashboard URL, signal strength, uptime and free heap
 - a small diagnostics log with recent Wi-Fi, HomeSpan and Tuya events
+
+You can add the dashboard to a phone home screen like a local web app. This is still just the ESP32 web dashboard, not a native mobile app.
 
 The admin page is plain local HTTP without login, so use it only on a trusted LAN or IoT network. Do not expose it to the internet.
 
