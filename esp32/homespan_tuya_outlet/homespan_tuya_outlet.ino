@@ -22,6 +22,7 @@ constexpr uint8_t RESET_CONFIG_PIN = 0;
 constexpr uint8_t WIFI_CONNECT_ATTEMPTS = 3;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t SETUP_WIFI_RETRY_INTERVAL_MS = 60000;
+constexpr uint32_t FACTORY_RESET_HOLD_MS = 8000;
 constexpr uint32_t PREFIX_55AA = 0x000055AA;
 constexpr uint32_t SUFFIX_55AA = 0x0000AA55;
 constexpr uint8_t CMD_SESS_KEY_NEG_START = 0x03;
@@ -75,7 +76,10 @@ bool session_ready = false;
 bool setup_mode = false;
 bool homekit_started = false;
 bool setup_retry_saved_wifi = false;
+bool reset_button_was_pressed = false;
+bool factory_reset_started = false;
 unsigned long last_setup_wifi_retry_ms = 0;
+unsigned long reset_button_pressed_ms = 0;
 
 String setup_ap_password;
 
@@ -1040,6 +1044,48 @@ void handleUnpairHomeKit() {
   ESP.restart();
 }
 
+void performFactoryReset(const char* reason) {
+  if (factory_reset_started) {
+    return;
+  }
+  factory_reset_started = true;
+  Serial.println();
+  Serial.print("Factory reset requested");
+  if (reason && strlen(reason) > 0) {
+    Serial.print(": ");
+    Serial.print(reason);
+  }
+  Serial.println();
+  clearConfig();
+  Serial.println("Clearing HomeKit device ID and pairing data.");
+  homeSpan.processSerialCommand("H");
+  delay(1000);
+  Serial.println("Restarting into setup mode.");
+  delay(500);
+  ESP.restart();
+}
+
+void handleResetButton() {
+  const bool pressed = digitalRead(RESET_CONFIG_PIN) == LOW;
+  if (pressed && !reset_button_was_pressed) {
+    reset_button_pressed_ms = millis();
+    reset_button_was_pressed = true;
+    Serial.println("Reset button pressed. Hold for 8 seconds for factory reset.");
+  }
+  if (!pressed) {
+    if (reset_button_was_pressed && !factory_reset_started) {
+      Serial.println("Reset button released before factory reset.");
+    }
+    reset_button_was_pressed = false;
+    reset_button_pressed_ms = 0;
+    return;
+  }
+  if (!factory_reset_started &&
+      millis() - reset_button_pressed_ms >= FACTORY_RESET_HOLD_MS) {
+    performFactoryReset("BOOT/GPIO0 held for 8 seconds");
+  }
+}
+
 void handleTestConfig() {
   const BridgeConfig candidate = configFromRequest();
   String error;
@@ -1424,6 +1470,7 @@ void setup() {
 }
 
 void loop() {
+  handleResetButton();
   if (setup_mode) {
     active_server = &setup_server;
     setup_server.handleClient();

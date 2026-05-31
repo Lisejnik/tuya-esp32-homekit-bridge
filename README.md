@@ -354,7 +354,14 @@ Open that URL from the same Wi-Fi network to edit the saved Tuya/HomeKit setting
 
 If Wi-Fi connection fails repeatedly during boot, the ESP32 falls back to setup mode and periodically retries the saved Wi-Fi. If the network comes back, the ESP32 restarts into normal HomeSpan mode.
 
-To clear the bridge configuration, hold GPIO0 / BOOT while the ESP32 starts. On some dev boards, holding BOOT before reset enters the bootloader; if that happens, press BOOT just after reset or use **Clear saved config** while setup mode is active. This does not clear HomeSpan pairing data.
+Reset options:
+
+- **Edit settings:** open the admin URL and save new values.
+- **Clear saved config:** use the admin/setup page button. This removes Wi-Fi and Tuya settings, restarts, and opens setup mode. It does not clear HomeKit pairing.
+- **Clear HomeKit pairing:** use the admin page button, then remove the accessory in Apple Home too.
+- **Factory reset:** while the ESP32 is running, hold the BOOT / GPIO0 button for about 8 seconds. This clears bridge configuration, HomeKit pairing data, and the HomeKit device ID, then restarts into setup mode.
+
+Holding GPIO0 / BOOT while the ESP32 starts still forces setup mode by clearing bridge configuration. On some dev boards, holding BOOT before reset enters the bootloader; if that happens, release BOOT and reset again.
 
 The HomeSpan sketch no longer requires `esp32/homespan_tuya_outlet/secrets.h`. Secrets are stored in ESP32 flash memory through the setup wizard and must still never be committed or shared.
 

@@ -297,7 +297,14 @@ Admin URL: http://192.168.1.50:8080
 
 Open that address from the same Wi-Fi network if you need to edit saved settings later. The admin page can also clear HomeKit pairing on the ESP32. It is plain local HTTP without login, so use it only on a trusted LAN or IoT network.
 
-To clear bridge configuration later, hold GPIO0 / BOOT while the ESP32 starts. On some ESP32 boards, holding BOOT too early enters flashing mode instead; if that happens, press BOOT just after reset or use **Clear saved config** when the setup page is open. This does not clear HomeSpan pairing data.
+Reset options:
+
+- To edit settings, open the admin URL and save new values.
+- To clear only Wi-Fi and Tuya settings, use **Clear saved config** on the admin/setup page.
+- To clear HomeKit pairing, use **Clear HomeKit pairing** on the admin page and remove the accessory in Apple Home too.
+- To start fully from scratch, hold the ESP32 **BOOT / GPIO0** button for about 8 seconds while it is running. This clears bridge configuration, HomeKit pairing data, and the HomeKit device ID, then restarts into setup mode.
+
+Holding BOOT while the ESP32 starts still forces setup mode by clearing bridge configuration. On some ESP32 boards, holding BOOT too early enters flashing mode instead; if that happens, release BOOT and reset again.
 
 ## Phase 11: Set HomeKit Pairing Code
 

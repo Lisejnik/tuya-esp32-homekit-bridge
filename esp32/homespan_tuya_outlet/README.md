@@ -50,11 +50,14 @@ After normal boot, Serial Monitor prints an admin URL with the ESP32's LAN IP ad
 
 If Wi-Fi connection fails repeatedly during boot, the sketch falls back to setup mode and periodically retries the saved Wi-Fi. If the network comes back, the ESP32 restarts into normal HomeSpan mode.
 
-## Clear Bridge Configuration
+## Reset Options
 
-Hold GPIO0 / BOOT while the ESP32 starts to clear saved bridge configuration and force setup mode. On some dev boards, holding BOOT before reset enters the bootloader; if that happens, press BOOT just after reset.
+- To edit settings, open the admin URL and save new values.
+- To clear only Wi-Fi and Tuya settings, use **Clear saved config** on the admin/setup page.
+- To clear HomeKit pairing, use **Clear HomeKit pairing** on the admin page and remove the accessory in Apple Home too.
+- To start fully from scratch, hold the ESP32 **BOOT / GPIO0** button for about 8 seconds while it is running. This clears bridge configuration, HomeKit pairing data, and the HomeKit device ID, then restarts into setup mode.
 
-The setup page also has **Clear saved config** while setup mode is active. This does not clear HomeSpan pairing data.
+Holding BOOT while the ESP32 starts still forces setup mode by clearing bridge configuration. On some dev boards, holding BOOT before reset enters the bootloader; if that happens, release BOOT and reset again.
 
 ## Arduino IDE Setup
 
