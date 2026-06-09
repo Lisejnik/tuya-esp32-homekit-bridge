@@ -293,7 +293,7 @@ The v2.1 setup page is split into steps:
 
 Use `Simple` mode if you only want the normal setup fields. Switch to `Advanced` when you need protocol version, relay DPS, polling interval, hostname, DPS scan, diagnostics, or backup/import tools.
 
-The **Find Tuya devices** button is experimental. It looks for devices with Tuya-like local ports open on the same network. If it finds something, use **Use this IP**, then still enter the correct Device ID and `local_key`.
+The **Find Tuya devices** button is experimental. It listens for Tuya UDP broadcasts and also looks for devices with Tuya-like local ports open on the same network. If it finds your device ID, use **Use this IP**, then still run **Test Tuya connection** with the correct `local_key`.
 
 The **Test Tuya connection** button gives more detail than just success or failure. It can show whether the IP and port are reachable, whether the local key/protocol look wrong, whether the relay DPS was found, and how long the response took.
 
@@ -323,7 +323,7 @@ Serial Monitor also prints a fallback IP URL like:
 Admin URL: http://192.168.1.50:8080
 ```
 
-If `tuya-homekit.local` works on a computer but not on your phone, the phone is usually on another Wi-Fi/VLAN, mobile data, a guest network, or the router blocks mDNS/multicast between clients. Use the fallback IP URL and check router client-isolation settings.
+If `tuya-homekit.local` works on a computer but not on your phone, the phone is usually on another Wi-Fi/VLAN, mobile data, a guest network, or the router blocks mDNS/multicast between clients. If `.local` stops resolving everywhere, use the fallback IP URL. The firmware refreshes mDNS periodically, but the IP URL is the most reliable address.
 
 Open that address from the same Wi-Fi network if you need to edit saved settings later. The admin dashboard can test Tuya connection, scan DPS values, restart the ESP32, clear bridge configuration, and clear HomeKit pairing on the ESP32.
 

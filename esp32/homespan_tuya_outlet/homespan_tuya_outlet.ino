@@ -5,18 +5,23 @@
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include <WiFiUdp.h>
 #include <esp_system.h>
 #include <time.h>
 #include <vector>
 
 #include "HomeSpan.h"
 #include "mbedtls/aes.h"
+#include "mbedtls/gcm.h"
 #include "mbedtls/md.h"
 
 namespace {
 
 constexpr uint16_t TUYA_PORT = 6668;
 constexpr uint16_t TUYA_ALT_PORT = 6669;
+constexpr uint16_t TUYA_UDP_PORT_31 = 6666;
+constexpr uint16_t TUYA_UDP_PORT_33 = 6667;
+constexpr uint16_t TUYA_UDP_PORT_APP = 7000;
 constexpr uint16_t ADMIN_PORT = 8080;
 constexpr uint16_t DNS_PORT = 53;
 constexpr char SETUP_AP_SSID[] = "TuyaHomeKit-Setup";
@@ -43,21 +48,29 @@ constexpr uint32_t WIFI_CONNECTED_LED_ON_MS = 400;
 constexpr uint32_t WIFI_CONNECTED_LED_OFF_MS = 400;
 constexpr uint32_t PREFIX_55AA = 0x000055AA;
 constexpr uint32_t SUFFIX_55AA = 0x0000AA55;
+constexpr uint32_t PREFIX_6699 = 0x00006699;
+constexpr uint32_t SUFFIX_6699 = 0x00009966;
 constexpr uint8_t CMD_SESS_KEY_NEG_START = 0x03;
 constexpr uint8_t CMD_SESS_KEY_NEG_RESP = 0x04;
 constexpr uint8_t CMD_SESS_KEY_NEG_FINISH = 0x05;
 constexpr uint8_t CMD_CONTROL_NEW = 0x0D;
 constexpr uint8_t CMD_DP_QUERY_NEW = 0x10;
+constexpr uint8_t CMD_REQ_DEVINFO = 0x25;
 constexpr size_t AES_BLOCK_SIZE = 16;
 constexpr size_t HMAC_SIZE = 32;
 constexpr uint32_t DEFAULT_POLL_INTERVAL_SECONDS = 30;
 constexpr size_t DIAGNOSTIC_LOG_SIZE = 16;
 constexpr uint8_t LAN_SCAN_MAX_RESULTS = 16;
-constexpr uint16_t LAN_SCAN_CONNECT_TIMEOUT_MS = 180;
+constexpr uint8_t TUYA_UDP_DISCOVERY_MAX_RESULTS = 16;
+constexpr uint32_t TUYA_UDP_DISCOVERY_LISTEN_MS = 8000;
+constexpr uint32_t TUYA_UDP_REDISCOVERY_LISTEN_MS = 7000;
+constexpr uint16_t LAN_SCAN_CONNECT_TIMEOUT_MS = 45;
 constexpr uint16_t TUYA_REDISCOVERY_CONNECT_TIMEOUT_MS = 180;
 constexpr uint16_t TUYA_REDISCOVERY_READ_TIMEOUT_MS = 900;
 constexpr uint32_t TUYA_REDISCOVERY_INTERVAL_MS = 3600000;
 constexpr uint32_t TUYA_REDISCOVERY_AFTER_FAILED_POLLS = 2;
+constexpr uint32_t MDNS_RETRY_INTERVAL_MS = 60000;
+constexpr uint32_t MDNS_REFRESH_INTERVAL_MS = 3600000;
 constexpr uint32_t HEALTH_LOW_HEAP_WARNING = 50000;
 constexpr uint32_t HEALTH_CRITICAL_HEAP = 25000;
 constexpr int HEALTH_WEAK_RSSI = -75;
@@ -68,6 +81,11 @@ constexpr uint32_t HEALTH_ERROR_FAILED_POLLS = 5;
 const uint8_t LOCAL_NONCE[AES_BLOCK_SIZE] = {
     '0', '1', '2', '3', '4', '5', '6', '7',
     '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+};
+
+const uint8_t TUYA_UDP_KEY[AES_BLOCK_SIZE] = {
+    0x6C, 0x1E, 0xC8, 0xE2, 0xBB, 0x9B, 0xB5, 0x9A,
+    0xB5, 0x0B, 0x0D, 0xAF, 0x64, 0x9B, 0x41, 0x0A,
 };
 
 struct BridgeConfig {
@@ -100,6 +118,15 @@ struct DpsEntry {
   String value;
   String label;
   bool is_boolean = false;
+};
+
+struct TuyaDiscoveryDevice {
+  IPAddress ip;
+  String device_id;
+  String version;
+  String product;
+  uint16_t udp_port = 0;
+  bool matched_configured_id = false;
 };
 
 struct TuyaDiagnostics {
@@ -141,6 +168,7 @@ WebServer* active_server = &setup_server;
 DNSServer dns_server;
 WiFiClient client;
 uint32_t sequence_number = 1;
+uint32_t udp_sequence_number = 1;
 uint8_t real_key[AES_BLOCK_SIZE] = {0};
 uint8_t session_key[AES_BLOCK_SIZE] = {0};
 bool session_ready = false;
@@ -165,6 +193,7 @@ bool mdns_failed = false;
 bool tuya_rediscovery_running = false;
 bool tuya_status_muted = false;
 unsigned long last_tuya_rediscovery_ms = 0;
+unsigned long last_mdns_attempt_ms = 0;
 uint32_t tuya_read_timeout_ms = 5000;
 
 String setup_ap_password;
@@ -293,6 +322,11 @@ void appendU32(std::vector<uint8_t>& out, uint32_t value) {
   out.push_back(value & 0xFF);
 }
 
+void appendU16(std::vector<uint8_t>& out, uint16_t value) {
+  out.push_back((value >> 8) & 0xFF);
+  out.push_back(value & 0xFF);
+}
+
 uint32_t readU32(const uint8_t* data) {
   return (uint32_t(data[0]) << 24) | (uint32_t(data[1]) << 16) |
          (uint32_t(data[2]) << 8) | uint32_t(data[3]);
@@ -393,6 +427,40 @@ bool hmacSha256(const uint8_t* key, size_t key_len, const uint8_t* data,
     return false;
   }
   return mbedtls_md_hmac(info, key, key_len, data, data_len, out) == 0;
+}
+
+bool aesGcmEncrypt(const uint8_t key[AES_BLOCK_SIZE], const uint8_t* iv,
+                   size_t iv_len, const uint8_t* aad, size_t aad_len,
+                   const uint8_t* clear, size_t clear_len,
+                   std::vector<uint8_t>& encrypted, uint8_t tag[AES_BLOCK_SIZE]) {
+  encrypted.assign(clear_len, 0);
+  mbedtls_gcm_context ctx;
+  mbedtls_gcm_init(&ctx);
+  int rc = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
+  if (rc == 0) {
+    rc = mbedtls_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_ENCRYPT, clear_len, iv,
+                                   iv_len, aad, aad_len, clear,
+                                   encrypted.data(), AES_BLOCK_SIZE, tag);
+  }
+  mbedtls_gcm_free(&ctx);
+  return rc == 0;
+}
+
+bool aesGcmDecrypt(const uint8_t key[AES_BLOCK_SIZE], const uint8_t* iv,
+                   size_t iv_len, const uint8_t* aad, size_t aad_len,
+                   const uint8_t* encrypted, size_t encrypted_len,
+                   const uint8_t tag[AES_BLOCK_SIZE],
+                   std::vector<uint8_t>& clear) {
+  clear.assign(encrypted_len, 0);
+  mbedtls_gcm_context ctx;
+  mbedtls_gcm_init(&ctx);
+  int rc = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
+  if (rc == 0) {
+    rc = mbedtls_gcm_auth_decrypt(&ctx, encrypted_len, iv, iv_len, aad, aad_len,
+                                  tag, AES_BLOCK_SIZE, encrypted, clear.data());
+  }
+  mbedtls_gcm_free(&ctx);
+  return rc == 0;
 }
 
 String htmlEscape(const String& value) {
@@ -778,6 +846,315 @@ bool extractJsonUInt(const String& json, const String& key, uint32_t& out) {
 
 bool jsonHasKey(const String& json, const String& key) {
   return findJsonKey(json, key) >= 0;
+}
+
+String bytesToString(const uint8_t* data, size_t length) {
+  String out;
+  out.reserve(length + 1);
+  for (size_t i = 0; i < length; i++) {
+    if (data[i] == 0) {
+      continue;
+    }
+    out += char(data[i]);
+  }
+  return out;
+}
+
+bool cleanJsonText(String& text) {
+  int start = text.indexOf('{');
+  int end = text.lastIndexOf('}');
+  if (start < 0 || end < start) {
+    return false;
+  }
+  text = text.substring(start, end + 1);
+  return true;
+}
+
+bool decryptTuyaUdp55aa(const uint8_t* data, size_t length, String& json) {
+  if (length < 28 || readU32(data) != PREFIX_55AA) {
+    return false;
+  }
+  const uint32_t packet_length = readU32(data + 12);
+  if (packet_length < 12 || length < size_t(16 + packet_length)) {
+    return false;
+  }
+  const uint32_t suffix = readU32(data + 16 + packet_length - 4);
+  if (suffix != SUFFIX_55AA) {
+    return false;
+  }
+
+  const uint8_t* payload = data + 20;
+  const size_t payload_length = packet_length - 12;
+  String text = bytesToString(payload, payload_length);
+  if (!cleanJsonText(text)) {
+    std::vector<uint8_t> clear;
+    if (!aesEcbDecrypt(TUYA_UDP_KEY, payload, payload_length, true, clear)) {
+      return false;
+    }
+    text = bytesToString(clear.data(), clear.size());
+    if (!cleanJsonText(text)) {
+      return false;
+    }
+  }
+  json = text;
+  return true;
+}
+
+bool decryptTuyaUdp6699(const uint8_t* data, size_t length, String& json) {
+  if (length < 50 || readU32(data) != PREFIX_6699) {
+    return false;
+  }
+  const uint32_t packet_length = readU32(data + 14);
+  if (packet_length < 28 || length < size_t(18 + packet_length + 4)) {
+    return false;
+  }
+  const uint32_t suffix = readU32(data + 18 + packet_length);
+  if (suffix != SUFFIX_6699) {
+    return false;
+  }
+
+  const uint8_t* iv = data + 18;
+  const uint8_t* encrypted = data + 30;
+  const size_t encrypted_length = packet_length - 28;
+  const uint8_t* tag = encrypted + encrypted_length;
+  std::vector<uint8_t> clear;
+  if (!aesGcmDecrypt(TUYA_UDP_KEY, iv, 12, data + 4, 14, encrypted,
+                     encrypted_length, tag, clear)) {
+    return false;
+  }
+  if (clear.size() > 4 && clear[0] != '{' && clear[4] == '{') {
+    clear.erase(clear.begin(), clear.begin() + 4);
+  }
+  String text = bytesToString(clear.data(), clear.size());
+  if (!cleanJsonText(text)) {
+    return false;
+  }
+  json = text;
+  return true;
+}
+
+bool decryptTuyaUdpPacket(const uint8_t* data, size_t length, String& json) {
+  if (length == 0) {
+    return false;
+  }
+  String text = bytesToString(data, length);
+  if (cleanJsonText(text)) {
+    json = text;
+    return true;
+  }
+  if (decryptTuyaUdp55aa(data, length, json)) {
+    return true;
+  }
+  if (decryptTuyaUdp6699(data, length, json)) {
+    return true;
+  }
+  if (length % AES_BLOCK_SIZE != 0) {
+    return false;
+  }
+  std::vector<uint8_t> clear;
+  if (!aesEcbDecrypt(TUYA_UDP_KEY, data, length, true, clear)) {
+    return false;
+  }
+  text = bytesToString(clear.data(), clear.size());
+  if (!cleanJsonText(text)) {
+    return false;
+  }
+  json = text;
+  return true;
+}
+
+bool discoveryDeviceFromJson(const String& json, const IPAddress& remote_ip,
+                             uint16_t udp_port, const String& wanted_device_id,
+                             TuyaDiscoveryDevice& device) {
+  String device_id;
+  if (!extractJsonString(json, "gwId", device_id) &&
+      !extractJsonString(json, "devId", device_id) &&
+      !extractJsonString(json, "id", device_id)) {
+    return false;
+  }
+  if (device_id.isEmpty()) {
+    return false;
+  }
+
+  String ip_text;
+  IPAddress payload_ip;
+  device.ip = remote_ip;
+  if (extractJsonString(json, "ip", ip_text) && payload_ip.fromString(ip_text)) {
+    device.ip = payload_ip;
+  }
+  device.device_id = device_id;
+  extractJsonString(json, "version", device.version);
+  if (device.version.isEmpty()) {
+    extractJsonString(json, "ver", device.version);
+  }
+  extractJsonString(json, "productKey", device.product);
+  if (device.product.isEmpty()) {
+    extractJsonString(json, "product_id", device.product);
+  }
+  device.udp_port = udp_port;
+  device.matched_configured_id =
+      !wanted_device_id.isEmpty() && device.device_id == wanted_device_id;
+  return true;
+}
+
+bool addDiscoveredDevice(std::vector<TuyaDiscoveryDevice>& devices,
+                         const TuyaDiscoveryDevice& device) {
+  for (TuyaDiscoveryDevice& existing : devices) {
+    if ((!device.device_id.isEmpty() &&
+         existing.device_id == device.device_id) ||
+        existing.ip == device.ip) {
+      existing.ip = device.ip;
+      existing.udp_port = device.udp_port;
+      if (existing.version.isEmpty()) {
+        existing.version = device.version;
+      }
+      if (existing.product.isEmpty()) {
+        existing.product = device.product;
+      }
+      existing.matched_configured_id =
+          existing.matched_configured_id || device.matched_configured_id;
+      return false;
+    }
+  }
+  if (devices.size() >= TUYA_UDP_DISCOVERY_MAX_RESULTS) {
+    return false;
+  }
+  devices.push_back(device);
+  return true;
+}
+
+IPAddress subnetBroadcastAddress() {
+  IPAddress local_ip = WiFi.localIP();
+  IPAddress subnet = WiFi.subnetMask();
+  IPAddress broadcast;
+  for (uint8_t i = 0; i < 4; i++) {
+    broadcast[i] = (local_ip[i] & subnet[i]) | uint8_t(~subnet[i]);
+  }
+  return broadcast;
+}
+
+bool packTuyaUdpDiscoveryRequest(std::vector<uint8_t>& packet) {
+  const String payload =
+      String("{\"from\":\"app\",\"ip\":\"") + WiFi.localIP().toString() + "\"}";
+  const uint32_t payload_length = payload.length();
+  const uint32_t packet_length = payload_length + 28;
+
+  std::vector<uint8_t> header;
+  appendU32(header, PREFIX_6699);
+  appendU16(header, 0);
+  appendU32(header, udp_sequence_number++);
+  appendU32(header, CMD_REQ_DEVINFO);
+  appendU32(header, packet_length);
+
+  char iv_text[13] = {0};
+  snprintf(iv_text, sizeof(iv_text), "%012lu",
+           static_cast<unsigned long>(millis()));
+  uint8_t iv[12] = {0};
+  memcpy(iv, iv_text, sizeof(iv));
+  std::vector<uint8_t> encrypted;
+  uint8_t tag[AES_BLOCK_SIZE] = {0};
+  if (!aesGcmEncrypt(TUYA_UDP_KEY, iv, sizeof(iv), header.data() + 4,
+                     header.size() - 4,
+                     reinterpret_cast<const uint8_t*>(payload.c_str()),
+                     payload_length, encrypted, tag)) {
+    return false;
+  }
+
+  packet = header;
+  appendBytes(packet, iv, sizeof(iv));
+  appendBytes(packet, encrypted.data(), encrypted.size());
+  appendBytes(packet, tag, sizeof(tag));
+  appendU32(packet, SUFFIX_6699);
+  return true;
+}
+
+void sendTuyaUdpDiscoveryRequest(WiFiUDP& udp_app) {
+  std::vector<uint8_t> packet;
+  if (!packTuyaUdpDiscoveryRequest(packet)) {
+    addDiagnosticLog("Tuya UDP discovery request encryption failed");
+    return;
+  }
+
+  IPAddress broadcast = subnetBroadcastAddress();
+  udp_app.beginPacket(broadcast, TUYA_UDP_PORT_APP);
+  udp_app.write(packet.data(), packet.size());
+  udp_app.endPacket();
+  udp_app.beginPacket(IPAddress(255, 255, 255, 255), TUYA_UDP_PORT_APP);
+  udp_app.write(packet.data(), packet.size());
+  udp_app.endPacket();
+}
+
+bool readTuyaUdpSocket(WiFiUDP& udp, uint16_t udp_port,
+                       const String& wanted_device_id,
+                       std::vector<TuyaDiscoveryDevice>& devices) {
+  const int packet_size = udp.parsePacket();
+  if (packet_size <= 0 || packet_size > 2048) {
+    return false;
+  }
+
+  std::vector<uint8_t> packet(packet_size);
+  const int read_size = udp.read(packet.data(), packet.size());
+  if (read_size <= 0) {
+    return false;
+  }
+
+  String json;
+  if (!decryptTuyaUdpPacket(packet.data(), size_t(read_size), json)) {
+    return false;
+  }
+
+  TuyaDiscoveryDevice device;
+  if (!discoveryDeviceFromJson(json, udp.remoteIP(), udp_port,
+                               wanted_device_id, device)) {
+    return false;
+  }
+  addDiscoveredDevice(devices, device);
+  return true;
+}
+
+bool discoverTuyaUdp(std::vector<TuyaDiscoveryDevice>& devices,
+                     uint32_t listen_ms, const String& wanted_device_id,
+                     bool send_discovery_request) {
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+
+  WiFiUDP udp31;
+  WiFiUDP udp33;
+  WiFiUDP udp_app;
+  const bool listen31 = udp31.begin(TUYA_UDP_PORT_31);
+  const bool listen33 = udp33.begin(TUYA_UDP_PORT_33);
+  const bool listen_app = udp_app.begin(TUYA_UDP_PORT_APP);
+  if (send_discovery_request && listen_app) {
+    sendTuyaUdpDiscoveryRequest(udp_app);
+  }
+
+  const unsigned long start = millis();
+  while (millis() - start < listen_ms &&
+         devices.size() < TUYA_UDP_DISCOVERY_MAX_RESULTS) {
+    if (listen31) {
+      readTuyaUdpSocket(udp31, TUYA_UDP_PORT_31, wanted_device_id, devices);
+    }
+    if (listen33) {
+      readTuyaUdpSocket(udp33, TUYA_UDP_PORT_33, wanted_device_id, devices);
+    }
+    if (listen_app) {
+      readTuyaUdpSocket(udp_app, TUYA_UDP_PORT_APP, wanted_device_id, devices);
+    }
+    delay(5);
+    yield();
+  }
+
+  udp31.stop();
+  udp33.stop();
+  udp_app.stop();
+
+  for (const TuyaDiscoveryDevice& device : devices) {
+    if (device.matched_configured_id) {
+      return true;
+    }
+  }
+  return !devices.empty();
 }
 
 String setupPasswordFromRandom() {
@@ -1665,6 +2042,39 @@ bool rediscoverConfiguredTuyaIp(String& found_ip, String& detail,
   last_tuya_rediscovery_ms = millis();
   addDiagnosticLog("Tuya IP rediscovery started");
 
+  std::vector<TuyaDiscoveryDevice> udp_devices;
+  discoverTuyaUdp(udp_devices, TUYA_UDP_REDISCOVERY_LISTEN_MS,
+                  config.tuya_device_id, true);
+  for (const TuyaDiscoveryDevice& device : udp_devices) {
+    if (!device.matched_configured_id) {
+      continue;
+    }
+    found_ip = device.ip.toString();
+    uint32_t auth_latency_ms = 0;
+    const bool auth_ok = probeConfiguredTuyaAtIp(device.ip, true, &auth_latency_ms);
+    detail = String("Found configured Tuya device ID by UDP broadcast at ") +
+             found_ip + " on UDP " + String(device.udp_port) + ".";
+    if (auth_ok) {
+      detail += " TCP/local-key verification OK; latency " +
+                String(auth_latency_ms) + " ms.";
+    } else {
+      detail += " TCP/local-key verification did not complete; saved the IP by exact device ID match.";
+    }
+    if (save_found_ip && found_ip != config.tuya_ip) {
+      String save_error;
+      if (!saveTuyaIpAddress(found_ip, save_error)) {
+        detail += " Could not save new IP: " + save_error;
+        tuya_rediscovery_running = false;
+        addDiagnosticLog(detail);
+        return false;
+      }
+      detail += " Saved new IP.";
+    }
+    tuya_rediscovery_running = false;
+    addDiagnosticLog(detail);
+    return true;
+  }
+
   IPAddress local_ip = WiFi.localIP();
   IPAddress gateway = WiFi.gatewayIP();
   IPAddress probe_ip(local_ip[0], local_ip[1], local_ip[2], 1);
@@ -1708,7 +2118,8 @@ bool rediscoverConfiguredTuyaIp(String& found_ip, String& detail,
     return true;
   }
 
-  detail = String("Configured Tuya plug was not found. Checked ") +
+  detail = String("Configured Tuya plug was not found. UDP heard ") +
+           String(udp_devices.size()) + " Tuya broadcast device(s); checked " +
            String(port_candidates) + " Tuya-port candidate(s).";
   tuya_rediscovery_running = false;
   addDiagnosticLog(detail);
@@ -1824,55 +2235,107 @@ String lanScanHtml(const BridgeConfig& candidate) {
   }
   html += F("<table><tr><th>IP address</th><th>Open port</th><th>Label</th><th>Action</th></tr>");
 
-  for (uint16_t host = 1; host <= 254 && found < LAN_SCAN_MAX_RESULTS; host++) {
-    probe_ip[3] = uint8_t(host);
-    if (probe_ip == local_ip || probe_ip == gateway) {
-      continue;
-    }
-    uint32_t latency_ms = 0;
-    bool open = testTcpPort(probe_ip, TUYA_PORT, LAN_SCAN_CONNECT_TIMEOUT_MS,
-                            &latency_ms);
-    uint16_t open_port = TUYA_PORT;
-    String label = "likely Tuya device";
-    if (!open) {
-      open = testTcpPort(probe_ip, TUYA_ALT_PORT, LAN_SCAN_CONNECT_TIMEOUT_MS,
-                         &latency_ms);
-      open_port = TUYA_ALT_PORT;
-      label = "possible Tuya device";
-    }
-    if (!open) {
-      continue;
+  std::vector<TuyaDiscoveryDevice> udp_devices;
+  discoverTuyaUdp(udp_devices, TUYA_UDP_DISCOVERY_LISTEN_MS,
+                  candidate.tuya_device_id, true);
+  for (const TuyaDiscoveryDevice& device : udp_devices) {
+    if (found >= LAN_SCAN_MAX_RESULTS) {
+      break;
     }
     bool authenticated_match = false;
     uint32_t auth_latency_ms = 0;
-    if (authenticated_scan_available && open_port == TUYA_PORT) {
-      authenticated_match = probeConfiguredTuyaAtIp(probe_ip, true, &auth_latency_ms);
+    String label = "Tuya UDP broadcast";
+    if (device.matched_configured_id) {
+      label = "matches configured Tuya device ID";
+    }
+    if (!device.version.isEmpty()) {
+      label += "; protocol ";
+      label += device.version;
+    }
+    if (!device.product.isEmpty()) {
+      label += "; product ";
+      label += device.product;
+    }
+    if (authenticated_scan_available && device.matched_configured_id) {
+      authenticated_match = probeConfiguredTuyaAtIp(device.ip, true, &auth_latency_ms);
       if (authenticated_match) {
         authenticated_found++;
-        label = "configured Tuya plug verified by local key and relay DPS";
+        label += "; TCP/local-key verification OK";
+      } else {
+        label += "; TCP/local-key verification not completed";
       }
     }
     found++;
     html += F("<tr><td>");
-    html += probe_ip.toString();
+    html += device.ip.toString();
+    html += F("</td><td>UDP ");
+    html += String(device.udp_port);
     html += F("</td><td>");
-    html += String(open_port);
-    html += F("</td><td>");
-    html += label;
-    html += F(" (");
-    html += String(latency_ms);
-    html += F(" ms");
+    html += htmlEscape(label);
     if (authenticated_match) {
-      html += F(", authenticated ");
+      html += F(" (authenticated ");
       html += String(auth_latency_ms);
-      html += F(" ms");
+      html += F(" ms)");
     }
-    html += F(")</td><td><button type=\"button\" class=\"small\" onclick=\"useIp('");
-    html += probe_ip.toString();
+    html += F("</td><td><button type=\"button\" class=\"small\" onclick=\"useIp('");
+    html += device.ip.toString();
     html += F("')\">Use this IP</button></td></tr>");
   }
+
+  if (udp_devices.empty()) {
+    for (uint16_t host = 1; host <= 254 && found < LAN_SCAN_MAX_RESULTS; host++) {
+      probe_ip[3] = uint8_t(host);
+      if (probe_ip == local_ip || probe_ip == gateway) {
+        continue;
+      }
+      uint32_t latency_ms = 0;
+      bool open = testTcpPort(probe_ip, TUYA_PORT, LAN_SCAN_CONNECT_TIMEOUT_MS,
+                              &latency_ms);
+      uint16_t open_port = TUYA_PORT;
+      String label = "likely Tuya device";
+      if (!open) {
+        open = testTcpPort(probe_ip, TUYA_ALT_PORT, LAN_SCAN_CONNECT_TIMEOUT_MS,
+                           &latency_ms);
+        open_port = TUYA_ALT_PORT;
+        label = "possible Tuya device";
+      }
+      if (!open) {
+        continue;
+      }
+      bool authenticated_match = false;
+      uint32_t auth_latency_ms = 0;
+      if (authenticated_scan_available && open_port == TUYA_PORT) {
+        authenticated_match =
+            probeConfiguredTuyaAtIp(probe_ip, true, &auth_latency_ms);
+        if (authenticated_match) {
+          authenticated_found++;
+          label = "configured Tuya plug verified by local key and relay DPS";
+        }
+      }
+      found++;
+      html += F("<tr><td>");
+      html += probe_ip.toString();
+      html += F("</td><td>");
+      html += String(open_port);
+      html += F("</td><td>");
+      html += label;
+      html += F(" (");
+      html += String(latency_ms);
+      html += F(" ms");
+      if (authenticated_match) {
+        html += F(", authenticated ");
+        html += String(auth_latency_ms);
+        html += F(" ms");
+      }
+      html += F(")</td><td><button type=\"button\" class=\"small\" onclick=\"useIp('");
+      html += probe_ip.toString();
+      html += F("')\">Use this IP</button></td></tr>");
+    }
+  } else {
+    html += F("<tr><td colspan=\"4\">UDP discovery returned device broadcasts, so the slower full TCP sweep was skipped. Use TCP diagnostics after selecting an IP if you need deeper verification.</td></tr>");
+  }
   if (found == 0) {
-    html += F("<tr><td colspan=\"4\">No open Tuya TCP candidates found. This can happen when the router blocks client-to-client traffic, the plug is on another VLAN/subnet, or TCP 6668 is not reachable. If TinyTuya finds devices from your computer, compare whether the ESP32 is on the same Wi-Fi/VLAN.</td></tr>");
+    html += F("<tr><td colspan=\"4\">No Tuya UDP broadcasts or open Tuya TCP candidates found. This can happen when the router blocks client-to-client traffic, multicast/broadcast, the plug is on another VLAN/subnet, or TCP 6668 is not reachable. If TinyTuya finds devices from your computer, compare whether the ESP32 is on the same Wi-Fi/VLAN.</td></tr>");
   }
   html += F("</table></div>");
   if (authenticated_found == 0 && authenticated_scan_available) {
@@ -1896,6 +2359,7 @@ bool startMdnsResponder() {
   if (mdns_started) {
     return true;
   }
+  last_mdns_attempt_ms = millis();
   if (config.device_hostname.isEmpty()) {
     config.device_hostname = DEFAULT_HOSTNAME;
   }
@@ -1915,6 +2379,33 @@ bool startMdnsResponder() {
   Serial.println(localDashboardUrl());
   addDiagnosticLog("mDNS started: " + localDashboardUrl());
   return true;
+}
+
+void maybeRefreshMdnsResponder() {
+  if (setup_mode || WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+  const unsigned long now = millis();
+  if (mdns_failed) {
+    if (now - last_mdns_attempt_ms < MDNS_RETRY_INTERVAL_MS) {
+      return;
+    }
+    MDNS.end();
+    mdns_started = false;
+    startMdnsResponder();
+    return;
+  }
+  if (!mdns_started) {
+    startMdnsResponder();
+    return;
+  }
+  if (now - last_mdns_attempt_ms < MDNS_REFRESH_INTERVAL_MS) {
+    return;
+  }
+  MDNS.end();
+  mdns_started = false;
+  addDiagnosticLog("Refreshing mDNS advertisement");
+  startMdnsResponder();
 }
 
 String appIconSvg() {
@@ -2240,7 +2731,7 @@ String setupPage(const String& message) {
   page += F("/ after setup. Default is tuya-homekit.local. Use only letters, numbers, and hyphens.</span></label>");
   page += F("</div></div>");
 
-  page += F("<div class=\"step\" data-step=\"1\"><p class=\"help\">Experimental LAN scan checks common Tuya ports on the ESP32 subnet. Results are only candidates.</p><div class=\"actions\"><button class=\"secondary\" type=\"button\" id=\"scan\">Find Tuya devices</button></div><div id=\"scanResult\"></div>");
+  page += F("<div class=\"step\" data-step=\"1\"><p class=\"help\">Experimental LAN scan listens for Tuya UDP broadcasts and checks common Tuya TCP ports on the ESP32 subnet. Results are only candidates unless the device ID or local key is verified.</p><div class=\"actions\"><button class=\"secondary\" type=\"button\" id=\"scan\">Find Tuya devices</button></div><div id=\"scanResult\"></div>");
   page += F("<label>Tuya plug IP address<input name=\"tuya_ip\" required placeholder=\"192.168.1.123\" value=\"");
   page += htmlEscape(config.tuya_ip);
   page += F("\"><span class=\"help\">Local IP address of the Tuya / Smart Life plug on your router.</span></label>");
@@ -2302,7 +2793,7 @@ String setupPage(const String& message) {
   page += F("dots.forEach((b,i)=>b.onclick=()=>showStep(i));document.getElementById('next').onclick=()=>showStep(step+1);document.getElementById('prev').onclick=()=>showStep(step-1);");
   page += F("function target(id){return document.getElementById(id)||document.getElementById('dashboardResult')||document.getElementById('result');}");
   page += F("async function postHtml(url,outId,msg){const out=target(outId);out.innerHTML='<div class=\"result-card\">'+msg+'</div>';try{const r=await fetch(url,{method:'POST',body:new FormData(form)});out.innerHTML=await r.text();}catch(e){out.innerHTML='<div class=\"result-card error\">Request failed.</div>';}}");
-  page += F("document.getElementById('test').onclick=()=>postHtml('/test','result','Testing Tuya connection...');document.getElementById('dps').onclick=()=>postHtml('/dps','result','Scanning DPS...');document.getElementById('scan').onclick=()=>postHtml('/scan','scanResult','Scanning LAN. This can take a few seconds...');");
+  page += F("document.getElementById('test').onclick=()=>postHtml('/test','result','Testing Tuya connection...');document.getElementById('dps').onclick=()=>postHtml('/dps','result','Scanning DPS...');document.getElementById('scan').onclick=()=>postHtml('/scan','scanResult','Scanning LAN. This can take 10-20 seconds...');");
   page += F("const dt=document.getElementById('dashTest');if(dt)dt.onclick=()=>postHtml('/test','dashboardResult','Testing Tuya connection...');const dd=document.getElementById('dashDps');if(dd)dd.onclick=()=>postHtml('/dps','dashboardResult','Scanning DPS...');");
   page += F("const dr=document.getElementById('dashRediscover');if(dr)dr.onclick=()=>postHtml('/rediscover','dashboardResult','Rediscovering configured Tuya plug. This can take up to a minute...');");
   page += F("window.useIp=ip=>{form.tuya_ip.value=ip;showStep(2)};window.useDps=dps=>{form.tuya_relay_dps.value=dps;showStep(2)};");
@@ -3075,6 +3566,7 @@ void loop() {
   }
   active_server = &admin_server;
   admin_server.handleClient();
+  maybeRefreshMdnsResponder();
   homeSpan.poll();
   refreshHomeKitPairingState();
   updateNormalStatusLed();

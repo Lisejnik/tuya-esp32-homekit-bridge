@@ -95,10 +95,15 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    from dotenv import load_dotenv
     import tinytuya
 
-    load_dotenv()
+    try:
+        from dotenv import load_dotenv
+    except ModuleNotFoundError:
+        load_dotenv = None
+
+    if load_dotenv:
+        load_dotenv()
     target_ip = args.target_ip or os.getenv("DEVICE_IP", DEFAULT_TARGET_IP)
 
     print("Scanning local network for Tuya devices...")

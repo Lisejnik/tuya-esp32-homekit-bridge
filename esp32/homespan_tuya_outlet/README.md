@@ -56,7 +56,7 @@ The setup access point runs a small captive portal helper. Most phones and compu
 
 Use **Test Tuya connection** before saving if you want structured diagnostics from the ESP32. The result shows whether the IP/port is reachable, which protocol version is used, whether authentication looks valid, whether the configured relay DPS was found, current relay state if available, response latency, and practical suggestions.
 
-The **Find Tuya devices** button is experimental. It scans the ESP32 local subnet for open Tuya-like TCP ports `6668` and `6669`, then labels results as `possible Tuya device` or `likely Tuya device`. It cannot prove that a device is Tuya and it cannot discover the `local_key`.
+The **Find Tuya devices** button is experimental. It listens for Tuya UDP broadcasts on `6666`, `6667`, and `7000`, then scans the ESP32 local subnet for open Tuya-like TCP ports `6668` and `6669`. UDP results can match the configured device ID. TCP/local-key verification is attempted when enough credentials are available. It cannot discover the `local_key`.
 
 The **Scan DPS** button is also experimental and read-only. It queries the status payload, lists returned Tuya datapoints, labels obvious boolean values as possible relay/switch candidates, and lets you copy a boolean datapoint into the relay DPS field. It does not toggle unknown datapoints.
 
@@ -72,9 +72,9 @@ If you changed the hostname in setup, replace `tuya-homekit` with your chosen ho
 
 The dashboard includes a PWA manifest and local SVG icon endpoint, so a phone can add the local dashboard to the home screen. This is a local web dashboard, not a native app.
 
-If `tuya-homekit.local` does not open on a phone, use the fallback IP URL shown in the dashboard or Serial Monitor. `.local` requires mDNS/multicast support on the same LAN. Guest networks, client isolation, or separated 2.4 GHz / 5 GHz networks can block it.
+If `tuya-homekit.local` does not open on a phone, use the fallback IP URL shown in the dashboard or Serial Monitor. `.local` requires mDNS/multicast support on the same LAN. Guest networks, client isolation, or separated 2.4 GHz / 5 GHz networks can block it. The firmware periodically refreshes mDNS, but the fallback IP URL is still the most reliable management address.
 
-If the Tuya plug receives a new DHCP IP address, the bridge can rediscover it. After repeated Tuya poll failures, the ESP32 scans the local subnet for TCP `6668`, verifies candidates with the saved local key and relay DPS, and saves the new IP when the configured plug is found. You can also run this manually from **Rediscover Tuya IP** on the dashboard.
+If the Tuya plug receives a new DHCP IP address, the bridge can rediscover it. After repeated Tuya poll failures, the ESP32 listens for Tuya UDP broadcasts and matches the saved device ID. If that does not find it, it scans the local subnet for TCP `6668`, verifies candidates with the saved local key and relay DPS, and saves the new IP when the configured plug is found. You can also run this manually from **Rediscover Tuya IP** on the dashboard.
 
 The admin dashboard shows:
 

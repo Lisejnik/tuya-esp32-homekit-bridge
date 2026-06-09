@@ -138,13 +138,15 @@ If it works on one device but not on a phone, check:
 
 The dashboard always shows a fallback IP URL, for example `http://192.168.0.142:8080/`.
 
+The firmware periodically refreshes its mDNS advertisement, but some routers and phones still handle `.local` names unreliably. The fallback IP URL is the most reliable management address when this happens.
+
 ### Tuya IP Rediscovery
 
 Tuya plugs can receive a new DHCP address after router restarts or lease changes. The bridge keeps the Tuya device ID and local key, but the old IP may stop working.
 
-When Tuya polling fails repeatedly, the ESP32 now scans its local subnet for TCP `6668` candidates and then verifies the configured plug with the saved Tuya local key, protocol version and relay DPS. If it finds the plug at a new IP, it saves the new IP to ESP32 Preferences automatically.
+When Tuya polling fails repeatedly, the ESP32 first listens for Tuya UDP discovery broadcasts on `6666`, `6667`, and `7000`. If a broadcast contains the saved Tuya device ID, it saves the new IP to ESP32 Preferences automatically. It also tries a TCP/local-key verification when possible. If UDP discovery does not find the device, it falls back to scanning the local subnet for TCP `6668` candidates and verifies them with the saved local key, protocol version, and relay DPS.
 
-The dashboard also has **Rediscover Tuya IP** for a manual scan. **Find Tuya devices** still lists open-port candidates, but when credentials are available it also marks the configured plug only after an encrypted Tuya status read succeeds.
+The dashboard also has **Rediscover Tuya IP** for a manual scan. **Find Tuya devices** now lists Tuya UDP broadcast devices as well as open-port candidates. A UDP result can match the configured plug by device ID; when credentials are available the scan also tries encrypted Tuya status verification.
 
 This is still local LAN discovery. It cannot cross VLANs/subnets, and it cannot discover a device if the router blocks client-to-client traffic.
 
@@ -193,9 +195,9 @@ The wizard has two modes:
 
 ### Experimental LAN Scan
 
-The **Find Tuya devices** button scans the ESP32's local subnet for candidates with common Tuya LAN ports open, especially `6668` and `6669`.
+The **Find Tuya devices** button listens for Tuya UDP broadcasts on `6666`, `6667`, and `7000`, then scans the ESP32's local subnet for candidates with common Tuya LAN ports open, especially `6668` and `6669`.
 
-Results are intentionally labelled as `possible Tuya device` or `likely Tuya device`. An open port is not proof that the device is Tuya. If a candidate looks right, use **Use this IP** and then run **Test Tuya connection** with the correct device ID and local key.
+Results are intentionally labelled. A UDP result that matches the configured device ID is stronger than an open TCP port, but the final proof is still **Test Tuya connection** with the correct local key. If a candidate looks right, use **Use this IP** and then run **Test Tuya connection**.
 
 LAN scan limitations:
 
@@ -651,8 +653,9 @@ The biggest unknown is Tuya firmware behavior. A future plug firmware update cou
 | Admin page is unreachable | ESP32 IP changed | Check Serial Monitor or reserve the ESP32 IP in your router |
 | I cannot open the dashboard | Wi-Fi changed or mDNS issue | Hold BOOT for 5s to enter Setup Mode |
 | `tuya-homekit.local` works on computer but not phone | Phone is on another network, guest isolation, or mDNS blocked | Use fallback IP URL and check router mDNS/client-isolation settings |
-| Tuya plug changed IP | Router DHCP lease changed | Use **Rediscover Tuya IP** or wait for automatic rediscovery after repeated poll failures |
-| Find Tuya devices shows no candidates | ESP32 cannot reach TCP `6668` on the plug network | Check same VLAN/subnet, client isolation, IoT network rules, and plug power |
+| `tuya-homekit.local` stops resolving | mDNS/multicast cache expired or router stopped forwarding it | Use fallback IP URL; firmware periodically refreshes mDNS and restart also re-advertises it |
+| Tuya plug changed IP | Router DHCP lease changed | Use **Rediscover Tuya IP** or wait for automatic UDP/TCP rediscovery after repeated poll failures |
+| Find Tuya devices shows no candidates | ESP32 cannot hear Tuya UDP broadcasts and cannot reach TCP `6668` on the plug network | Check same VLAN/subnet, client isolation, multicast/broadcast filtering, IoT network rules, and plug power |
 | I want to start over | Bad config or wrong HomeKit pairing | Hold BOOT for 15s for Factory Reset |
 | Import fails | Invalid JSON or unsupported values | Check validation warnings in the preview |
 | Exported config does not contain `local_key` | Secrets are excluded by default | Re-export with sensitive values only if you need a full private backup |
