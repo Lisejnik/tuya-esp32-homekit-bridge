@@ -323,6 +323,8 @@ Serial Monitor also prints a fallback IP URL like:
 Admin URL: http://192.168.1.50:8080
 ```
 
+If `tuya-homekit.local` works on a computer but not on your phone, the phone is usually on another Wi-Fi/VLAN, mobile data, a guest network, or the router blocks mDNS/multicast between clients. Use the fallback IP URL and check router client-isolation settings.
+
 Open that address from the same Wi-Fi network if you need to edit saved settings later. The admin dashboard can test Tuya connection, scan DPS values, restart the ESP32, clear bridge configuration, and clear HomeKit pairing on the ESP32.
 
 The dashboard also shows current HomeKit, Tuya and network status:
@@ -347,6 +349,13 @@ Restore:
 - Click **Preview import** first.
 - If the preview is correct, click **Apply import and restart**.
 - If the JSON does not contain secrets, the ESP32 keeps the saved Wi-Fi password and Tuya local key when possible.
+
+Tuya IP changes:
+
+- If the router gives the plug a new IP, the ESP32 may lose contact with it.
+- After repeated Tuya polling failures, the ESP32 scans the local subnet and tries to verify the configured plug using the saved local key.
+- If it finds the plug, it saves the new IP automatically.
+- You can also click **Rediscover Tuya IP** in the dashboard.
 
 The admin page is plain local HTTP without login, so use it only on a trusted LAN or IoT network. Do not expose it to the internet.
 

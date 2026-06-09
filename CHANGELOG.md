@@ -12,6 +12,9 @@
 - Add 5s BOOT hold Setup Mode and 15s BOOT hold Factory Reset behavior.
 - Add dashboard health status with reason, update time, and suggested fix.
 - Add Simple and Advanced wizard modes.
+- Add authenticated Tuya IP rediscovery when the configured plug stops responding.
+- Improve LAN scan by verifying the configured plug with the saved local key and relay DPS when credentials are available.
+- Add manual dashboard action to rediscover and save the Tuya plug IP.
 
 ## v2.1 - Smart Setup & Diagnostics
 

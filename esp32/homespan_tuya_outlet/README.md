@@ -72,6 +72,10 @@ If you changed the hostname in setup, replace `tuya-homekit` with your chosen ho
 
 The dashboard includes a PWA manifest and local SVG icon endpoint, so a phone can add the local dashboard to the home screen. This is a local web dashboard, not a native app.
 
+If `tuya-homekit.local` does not open on a phone, use the fallback IP URL shown in the dashboard or Serial Monitor. `.local` requires mDNS/multicast support on the same LAN. Guest networks, client isolation, or separated 2.4 GHz / 5 GHz networks can block it.
+
+If the Tuya plug receives a new DHCP IP address, the bridge can rediscover it. After repeated Tuya poll failures, the ESP32 scans the local subnet for TCP `6668`, verifies candidates with the saved local key and relay DPS, and saves the new IP when the configured plug is found. You can also run this manually from **Rediscover Tuya IP** on the dashboard.
+
 The admin dashboard shows:
 
 - health status with reason, last update and suggested fix

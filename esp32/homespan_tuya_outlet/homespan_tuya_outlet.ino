@@ -53,7 +53,11 @@ constexpr size_t HMAC_SIZE = 32;
 constexpr uint32_t DEFAULT_POLL_INTERVAL_SECONDS = 30;
 constexpr size_t DIAGNOSTIC_LOG_SIZE = 16;
 constexpr uint8_t LAN_SCAN_MAX_RESULTS = 16;
-constexpr uint16_t LAN_SCAN_CONNECT_TIMEOUT_MS = 35;
+constexpr uint16_t LAN_SCAN_CONNECT_TIMEOUT_MS = 180;
+constexpr uint16_t TUYA_REDISCOVERY_CONNECT_TIMEOUT_MS = 180;
+constexpr uint16_t TUYA_REDISCOVERY_READ_TIMEOUT_MS = 900;
+constexpr uint32_t TUYA_REDISCOVERY_INTERVAL_MS = 3600000;
+constexpr uint32_t TUYA_REDISCOVERY_AFTER_FAILED_POLLS = 2;
 constexpr uint32_t HEALTH_LOW_HEAP_WARNING = 50000;
 constexpr uint32_t HEALTH_CRITICAL_HEAP = 25000;
 constexpr int HEALTH_WEAK_RSSI = -75;
@@ -158,6 +162,10 @@ bool sos_led_on = false;
 bool captive_dns_started = false;
 bool mdns_started = false;
 bool mdns_failed = false;
+bool tuya_rediscovery_running = false;
+bool tuya_status_muted = false;
+unsigned long last_tuya_rediscovery_ms = 0;
+uint32_t tuya_read_timeout_ms = 5000;
 
 String setup_ap_password;
 RuntimeStatus runtime_status;
@@ -168,6 +176,7 @@ uint8_t diagnostic_log_count = 0;
 bool connectConfiguredWiFi(const BridgeConfig& candidate, bool keep_ap);
 String setupPage(const String& message);
 void startSetupMode(const String& reason, bool retry_saved_wifi = false);
+void maybeRediscoverTuyaIpAfterFailure();
 
 void addDiagnosticLog(const String& event) {
   const uint8_t index =
@@ -926,6 +935,22 @@ bool saveConfig(const BridgeConfig& candidate, String& error) {
   return true;
 }
 
+bool saveTuyaIpAddress(const String& tuya_ip, String& error) {
+  IPAddress parsed;
+  if (!parsed.fromString(tuya_ip)) {
+    error = "Refusing to save invalid Tuya IP address.";
+    return false;
+  }
+  if (!preferences.begin(PREF_NAMESPACE, false)) {
+    error = "Could not open ESP32 Preferences for writing Tuya IP.";
+    return false;
+  }
+  preferences.putString("tuya_ip", tuya_ip);
+  preferences.end();
+  config.tuya_ip = tuya_ip;
+  return true;
+}
+
 void clearConfig() {
   if (!preferences.begin(PREF_NAMESPACE, false)) {
     Serial.println("Could not open Preferences for clearing.");
@@ -1025,7 +1050,7 @@ bool connectTuyaPort(uint16_t port, uint32_t timeout_ms) {
     Serial.println("TCP connection failed.");
     return false;
   }
-  client.setTimeout(5000);
+  client.setTimeout(timeout_ms);
   return true;
 }
 
@@ -1049,7 +1074,7 @@ bool testTcpPort(const IPAddress& ip, uint16_t port, uint32_t timeout_ms,
 bool readExact(uint8_t* data, size_t length) {
   size_t got = 0;
   unsigned long start = millis();
-  while (got < length && millis() - start < 5000) {
+  while (got < length && millis() - start < tuya_read_timeout_ms) {
     int available = client.available();
     if (available <= 0) {
       delay(5);
@@ -1386,7 +1411,9 @@ bool tuyaQueryStatusPayload(String& payload_json, uint32_t* latency_ms,
                             String* error) {
   const unsigned long start = millis();
   if (!ensureSession()) {
-    setTuyaError(true);
+    if (!tuya_status_muted) {
+      setTuyaError(true);
+    }
     if (error) {
       *error = "Could not negotiate Tuya session. Check IP, local key, and protocol version.";
     }
@@ -1398,7 +1425,9 @@ bool tuyaQueryStatusPayload(String& payload_json, uint32_t* latency_ms,
                      strlen(payload), session_key, false, &response)) {
     Serial.println("Status command failed.");
     resetTuyaSession();
-    setTuyaError(true);
+    if (!tuya_status_muted) {
+      setTuyaError(true);
+    }
     if (error) {
       *error = "Status command failed or timed out.";
     }
@@ -1408,7 +1437,9 @@ bool tuyaQueryStatusPayload(String& payload_json, uint32_t* latency_ms,
   if (!decryptPayload(session_key, response, clear)) {
     Serial.println("Could not decrypt status response.");
     resetTuyaSession();
-    setTuyaError(true);
+    if (!tuya_status_muted) {
+      setTuyaError(true);
+    }
     if (error) {
       *error = "Status response could not be decrypted. The local key or protocol version may be wrong.";
     }
@@ -1419,7 +1450,9 @@ bool tuyaQueryStatusPayload(String& payload_json, uint32_t* latency_ms,
     *latency_ms = uint32_t(millis() - start);
   }
   resetTuyaSession();
-  setTuyaError(false);
+  if (!tuya_status_muted) {
+    setTuyaError(false);
+  }
   return true;
 }
 
@@ -1431,6 +1464,7 @@ bool tuyaStatus() {
     runtime_status.last_tuya_status = error;
     runtime_status.failed_poll_count++;
     addDiagnosticLog("Tuya poll failed: " + error);
+    maybeRediscoverTuyaIpAfterFailure();
     return false;
   }
   Serial.println("Tuya clear payload:");
@@ -1470,6 +1504,7 @@ bool tuyaReadPower(bool& is_on) {
   runtime_status.relay_state_known = false;
   addDiagnosticLog("Tuya poll failed: relay DPS not found");
   setTuyaError(true);
+  maybeRediscoverTuyaIpAfterFailure();
   return false;
 }
 
@@ -1578,6 +1613,129 @@ TuyaDiagnostics runTuyaDiagnostics() {
   return diagnostics;
 }
 
+bool probeConfiguredTuyaAtIp(const IPAddress& ip, bool require_relay_dps,
+                             uint32_t* latency_ms) {
+  const String previous_ip = config.tuya_ip;
+  const uint32_t previous_timeout = tuya_read_timeout_ms;
+  const bool previous_muted = tuya_status_muted;
+  config.tuya_ip = ip.toString();
+  tuya_read_timeout_ms = TUYA_REDISCOVERY_READ_TIMEOUT_MS;
+  tuya_status_muted = true;
+  resetTuyaSession();
+
+  String payload_json;
+  uint32_t probe_latency_ms = 0;
+  String error;
+  const bool ok =
+      tuyaQueryStatusPayload(payload_json, &probe_latency_ms, &error);
+  resetTuyaSession();
+  config.tuya_ip = previous_ip;
+  tuya_read_timeout_ms = previous_timeout;
+  tuya_status_muted = previous_muted;
+  if (latency_ms) {
+    *latency_ms = probe_latency_ms;
+  }
+  if (!ok) {
+    return false;
+  }
+  if (!require_relay_dps) {
+    return true;
+  }
+  bool relay_state = false;
+  return parseRelayStateFromText(payload_json, config.tuya_relay_dps,
+                                 relay_state);
+}
+
+bool rediscoverConfiguredTuyaIp(String& found_ip, String& detail,
+                                bool save_found_ip) {
+  if (tuya_rediscovery_running) {
+    detail = "Tuya rediscovery is already running.";
+    return false;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    detail = "Wi-Fi is not connected.";
+    return false;
+  }
+  if (!parseLocalKey()) {
+    detail = "Tuya local key is missing or invalid.";
+    return false;
+  }
+
+  tuya_rediscovery_running = true;
+  last_tuya_rediscovery_ms = millis();
+  addDiagnosticLog("Tuya IP rediscovery started");
+
+  IPAddress local_ip = WiFi.localIP();
+  IPAddress gateway = WiFi.gatewayIP();
+  IPAddress probe_ip(local_ip[0], local_ip[1], local_ip[2], 1);
+  uint16_t port_candidates = 0;
+  uint32_t found_latency_ms = 0;
+
+  for (uint16_t host = 1; host <= 254; host++) {
+    probe_ip[3] = uint8_t(host);
+    if (probe_ip == local_ip || probe_ip == gateway) {
+      continue;
+    }
+    uint32_t port_latency_ms = 0;
+    if (!testTcpPort(probe_ip, TUYA_PORT, TUYA_REDISCOVERY_CONNECT_TIMEOUT_MS,
+                     &port_latency_ms)) {
+      delay(1);
+      continue;
+    }
+    port_candidates++;
+    if (!probeConfiguredTuyaAtIp(probe_ip, true, &found_latency_ms)) {
+      delay(1);
+      continue;
+    }
+
+    found_ip = probe_ip.toString();
+    detail = String("Found configured Tuya plug at ") + found_ip +
+             " after checking " + String(port_candidates) +
+             " Tuya-port candidate(s); latency " +
+             String(found_latency_ms) + " ms.";
+    if (save_found_ip && found_ip != config.tuya_ip) {
+      String save_error;
+      if (!saveTuyaIpAddress(found_ip, save_error)) {
+        detail += " Could not save new IP: " + save_error;
+        tuya_rediscovery_running = false;
+        addDiagnosticLog(detail);
+        return false;
+      }
+      detail += " Saved new IP.";
+    }
+    tuya_rediscovery_running = false;
+    addDiagnosticLog(detail);
+    return true;
+  }
+
+  detail = String("Configured Tuya plug was not found. Checked ") +
+           String(port_candidates) + " Tuya-port candidate(s).";
+  tuya_rediscovery_running = false;
+  addDiagnosticLog(detail);
+  return false;
+}
+
+void maybeRediscoverTuyaIpAfterFailure() {
+  if (WiFi.status() != WL_CONNECTED || tuya_rediscovery_running ||
+      runtime_status.failed_poll_count < TUYA_REDISCOVERY_AFTER_FAILED_POLLS) {
+    return;
+  }
+  if (last_tuya_rediscovery_ms != 0 &&
+      millis() - last_tuya_rediscovery_ms < TUYA_REDISCOVERY_INTERVAL_MS) {
+    return;
+  }
+  String found_ip;
+  String detail;
+  if (rediscoverConfiguredTuyaIp(found_ip, detail, true)) {
+    runtime_status.failed_poll_count = 0;
+    runtime_status.last_tuya_status = "Tuya IP rediscovered: " + found_ip;
+    resetTuyaSession();
+    setTuyaError(false);
+  } else {
+    runtime_status.last_tuya_status = detail;
+  }
+}
+
 String diagnosticsHtml(const TuyaDiagnostics& diagnostics) {
   String html;
   html.reserve(3000);
@@ -1632,7 +1790,7 @@ String dpsInspectorHtml(const String& payload_json) {
 
 String lanScanHtml(const BridgeConfig& candidate) {
   String html;
-  html.reserve(6000);
+  html.reserve(9000);
   const bool already_on_wifi = WiFi.status() == WL_CONNECTED;
   if (!already_on_wifi && candidate.wifi_ssid.isEmpty()) {
     return F("<div class=\"result-card error\">Enter Wi-Fi SSID first. The ESP32 must join the LAN before it can scan it.</div>");
@@ -1644,12 +1802,26 @@ String lanScanHtml(const BridgeConfig& candidate) {
     return F("<div class=\"result-card error\">Wi-Fi connection failed. Check SSID/password before scanning.</div>");
   }
 
+  const BridgeConfig previous_config = config;
+  String validation_error;
+  const bool authenticated_scan_available = validateConfig(candidate, validation_error);
+  if (authenticated_scan_available) {
+    config = candidate;
+    parseLocalKey();
+  }
+
   IPAddress local_ip = WiFi.localIP();
   IPAddress gateway = WiFi.gatewayIP();
   IPAddress probe_ip(local_ip[0], local_ip[1], local_ip[2], 1);
   uint8_t found = 0;
+  uint8_t authenticated_found = 0;
   html += F("<div class=\"result-card\"><h3>Experimental LAN scan</h3>");
-  html += F("<p class=\"help\">Results are candidates only. Tuya detection cannot be guaranteed from an open TCP port alone.</p>");
+  html += F("<p class=\"help\">Open-port results are candidates only. If Wi-Fi, local key, protocol and relay DPS are filled, the scan also tries to verify the configured plug by encrypted Tuya status read.</p>");
+  if (!authenticated_scan_available) {
+    html += F("<p class=\"help\"><strong>Authenticated scan unavailable:</strong> ");
+    html += htmlEscape(validation_error);
+    html += F("</p>");
+  }
   html += F("<table><tr><th>IP address</th><th>Open port</th><th>Label</th><th>Action</th></tr>");
 
   for (uint16_t host = 1; host <= 254 && found < LAN_SCAN_MAX_RESULTS; host++) {
@@ -1671,6 +1843,15 @@ String lanScanHtml(const BridgeConfig& candidate) {
     if (!open) {
       continue;
     }
+    bool authenticated_match = false;
+    uint32_t auth_latency_ms = 0;
+    if (authenticated_scan_available && open_port == TUYA_PORT) {
+      authenticated_match = probeConfiguredTuyaAtIp(probe_ip, true, &auth_latency_ms);
+      if (authenticated_match) {
+        authenticated_found++;
+        label = "configured Tuya plug verified by local key and relay DPS";
+      }
+    }
     found++;
     html += F("<tr><td>");
     html += probe_ip.toString();
@@ -1680,20 +1861,34 @@ String lanScanHtml(const BridgeConfig& candidate) {
     html += label;
     html += F(" (");
     html += String(latency_ms);
-    html += F(" ms)</td><td><button type=\"button\" class=\"small\" onclick=\"useIp('");
+    html += F(" ms");
+    if (authenticated_match) {
+      html += F(", authenticated ");
+      html += String(auth_latency_ms);
+      html += F(" ms");
+    }
+    html += F(")</td><td><button type=\"button\" class=\"small\" onclick=\"useIp('");
     html += probe_ip.toString();
     html += F("')\">Use this IP</button></td></tr>");
   }
   if (found == 0) {
-    html += F("<tr><td colspan=\"4\">No candidates found. The plug may be offline, on another subnet/VLAN, or blocking Tuya LAN ports.</td></tr>");
+    html += F("<tr><td colspan=\"4\">No open Tuya TCP candidates found. This can happen when the router blocks client-to-client traffic, the plug is on another VLAN/subnet, or TCP 6668 is not reachable. If TinyTuya finds devices from your computer, compare whether the ESP32 is on the same Wi-Fi/VLAN.</td></tr>");
   }
   html += F("</table></div>");
+  if (authenticated_found == 0 && authenticated_scan_available) {
+    html += F("<div class=\"result-card\"><p class=\"help\">No configured plug was authenticated. The ESP32 found ");
+    html += String(found);
+    html += F(" open-port candidate(s), but none matched the saved local key and relay DPS.</p></div>");
+  }
 
   if (!already_on_wifi) {
     WiFi.disconnect(false);
     WiFi.mode(WIFI_AP);
   }
-  addDiagnosticLog(String("LAN scan finished; candidates found: ") + found);
+  config = previous_config;
+  resetTuyaSession();
+  addDiagnosticLog(String("LAN scan finished; candidates found: ") + found +
+                   ", authenticated: " + authenticated_found);
   return html;
 }
 
@@ -1994,6 +2189,7 @@ String setupPage(const String& message) {
     page += F("</table></div></div><div class=\"actions\">");
     page += F("<button class=\"secondary\" type=\"button\" id=\"dashTest\">Test Tuya connection</button>");
     page += F("<button class=\"secondary\" type=\"button\" id=\"dashDps\">Scan DPS</button>");
+    page += F("<button class=\"secondary\" type=\"button\" id=\"dashRediscover\">Rediscover Tuya IP</button>");
     page += F("<button class=\"secondary\" type=\"button\" id=\"restart\">Restart ESP32</button>");
     page += F("<button class=\"danger\" type=\"button\" id=\"resetDash\">Reset configuration</button>");
     page += F("<button class=\"danger\" type=\"button\" id=\"unpairDash\">Reset HomeKit pairing</button>");
@@ -2108,6 +2304,7 @@ String setupPage(const String& message) {
   page += F("async function postHtml(url,outId,msg){const out=target(outId);out.innerHTML='<div class=\"result-card\">'+msg+'</div>';try{const r=await fetch(url,{method:'POST',body:new FormData(form)});out.innerHTML=await r.text();}catch(e){out.innerHTML='<div class=\"result-card error\">Request failed.</div>';}}");
   page += F("document.getElementById('test').onclick=()=>postHtml('/test','result','Testing Tuya connection...');document.getElementById('dps').onclick=()=>postHtml('/dps','result','Scanning DPS...');document.getElementById('scan').onclick=()=>postHtml('/scan','scanResult','Scanning LAN. This can take a few seconds...');");
   page += F("const dt=document.getElementById('dashTest');if(dt)dt.onclick=()=>postHtml('/test','dashboardResult','Testing Tuya connection...');const dd=document.getElementById('dashDps');if(dd)dd.onclick=()=>postHtml('/dps','dashboardResult','Scanning DPS...');");
+  page += F("const dr=document.getElementById('dashRediscover');if(dr)dr.onclick=()=>postHtml('/rediscover','dashboardResult','Rediscovering configured Tuya plug. This can take up to a minute...');");
   page += F("window.useIp=ip=>{form.tuya_ip.value=ip;showStep(2)};window.useDps=dps=>{form.tuya_relay_dps.value=dps;showStep(2)};");
   page += F("async function postPlain(url,msg){const out=target('dashboardResult');out.innerHTML='<div class=\"result-card\">'+msg+'</div>';const r=await fetch(url,{method:'POST'});out.innerHTML='<div class=\"result-card\">'+await r.text()+'</div>';}");
   page += F("document.getElementById('exportCfg').onclick=()=>{const s=document.getElementById('includeSecrets').checked;if(s&&!confirm('This file contains secrets. Anyone with this file may be able to access your Wi-Fi or control your Tuya device. Continue?'))return;location.href='/export?include_sensitive='+(s?'1':'0')};");
@@ -2372,6 +2569,17 @@ void handleLanScan() {
   requestServer().send(200, "text/html", lanScanHtml(candidate));
 }
 
+void handleRediscoverTuyaIp() {
+  String found_ip;
+  String detail;
+  const bool ok = rediscoverConfiguredTuyaIp(found_ip, detail, true);
+  String html = ok ? F("<div class=\"result-card\"><h3>Tuya IP rediscovered</h3><p>")
+                   : F("<div class=\"result-card error\"><h3>Tuya IP rediscovery failed</h3><p>");
+  html += htmlEscape(detail);
+  html += F("</p></div>");
+  requestServer().send(ok ? 200 : 502, "text/html", html);
+}
+
 void handleDpsScan() {
   const BridgeConfig candidate = configFromRequest();
   String error;
@@ -2475,6 +2683,7 @@ void startSetupMode(const String& reason, bool retry_saved_wifi) {
   setup_server.on("/reset", HTTP_POST, handleResetConfig);
   setup_server.on("/test", HTTP_POST, handleTestConfig);
   setup_server.on("/scan", HTTP_POST, handleLanScan);
+  setup_server.on("/rediscover", HTTP_POST, handleRediscoverTuyaIp);
   setup_server.on("/dps", HTTP_POST, handleDpsScan);
   setup_server.on("/unpair", HTTP_POST, handleUnpairHomeKit);
   setup_server.on("/restart", HTTP_POST, handleRestart);
@@ -2494,6 +2703,7 @@ void startAdminServer() {
   admin_server.on("/reset", HTTP_POST, handleResetConfig);
   admin_server.on("/test", HTTP_POST, handleTestConfig);
   admin_server.on("/scan", HTTP_POST, handleLanScan);
+  admin_server.on("/rediscover", HTTP_POST, handleRediscoverTuyaIp);
   admin_server.on("/dps", HTTP_POST, handleDpsScan);
   admin_server.on("/unpair", HTTP_POST, handleUnpairHomeKit);
   admin_server.on("/restart", HTTP_POST, handleRestart);

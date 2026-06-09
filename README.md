@@ -124,6 +124,30 @@ Available dashboard actions:
 
 The dashboard includes a PWA manifest and local icon endpoint, so phones can add the dashboard bookmark to the home screen. This is still a local web dashboard, not a native app.
 
+### Local `.local` Access Notes
+
+`http://tuya-homekit.local:8080/` uses mDNS. It usually works on Apple devices when the phone/computer and ESP32 are on the same LAN and the router allows multicast traffic.
+
+If it works on one device but not on a phone, check:
+
+- the phone is on Wi-Fi, not mobile data
+- the phone is on the same SSID/VLAN as the ESP32
+- the router does not enable client isolation or guest isolation
+- the router allows mDNS/multicast between 2.4 GHz and 5 GHz clients
+- Android devices may need the fallback IP URL if `.local` resolution is unreliable
+
+The dashboard always shows a fallback IP URL, for example `http://192.168.0.142:8080/`.
+
+### Tuya IP Rediscovery
+
+Tuya plugs can receive a new DHCP address after router restarts or lease changes. The bridge keeps the Tuya device ID and local key, but the old IP may stop working.
+
+When Tuya polling fails repeatedly, the ESP32 now scans its local subnet for TCP `6668` candidates and then verifies the configured plug with the saved Tuya local key, protocol version and relay DPS. If it finds the plug at a new IP, it saves the new IP to ESP32 Preferences automatically.
+
+The dashboard also has **Rediscover Tuya IP** for a manual scan. **Find Tuya devices** still lists open-port candidates, but when credentials are available it also marks the configured plug only after an encrypted Tuya status read succeeds.
+
+This is still local LAN discovery. It cannot cross VLANs/subnets, and it cannot discover a device if the router blocks client-to-client traffic.
+
 ## Backup, Restore and Health
 
 The dashboard can export the current configuration as:
@@ -626,6 +650,9 @@ The biggest unknown is Tuya firmware behavior. A future plug firmware update cou
 | HomeKit state updates slowly | Polling interval is high | Lower polling interval if your network and plug tolerate it |
 | Admin page is unreachable | ESP32 IP changed | Check Serial Monitor or reserve the ESP32 IP in your router |
 | I cannot open the dashboard | Wi-Fi changed or mDNS issue | Hold BOOT for 5s to enter Setup Mode |
+| `tuya-homekit.local` works on computer but not phone | Phone is on another network, guest isolation, or mDNS blocked | Use fallback IP URL and check router mDNS/client-isolation settings |
+| Tuya plug changed IP | Router DHCP lease changed | Use **Rediscover Tuya IP** or wait for automatic rediscovery after repeated poll failures |
+| Find Tuya devices shows no candidates | ESP32 cannot reach TCP `6668` on the plug network | Check same VLAN/subnet, client isolation, IoT network rules, and plug power |
 | I want to start over | Bad config or wrong HomeKit pairing | Hold BOOT for 15s for Factory Reset |
 | Import fails | Invalid JSON or unsupported values | Check validation warnings in the preview |
 | Exported config does not contain `local_key` | Secrets are excluded by default | Re-export with sensitive values only if you need a full private backup |
