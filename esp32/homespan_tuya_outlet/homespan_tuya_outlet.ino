@@ -2418,7 +2418,7 @@ String webManifestJson() {
   json += F("{\"name\":\"Tuya HomeKit Bridge\",\"short_name\":\"Tuya Bridge\",");
   json += F("\"description\":\"Local ESP32 dashboard for Tuya HomeKit Bridge\",");
   json += F("\"start_url\":\"/\",\"scope\":\"/\",\"display\":\"standalone\",");
-  json += F("\"background_color\":\"#f6f8fa\",\"theme_color\":\"#008b8b\",");
+  json += F("\"background_color\":\"#0b0f14\",\"theme_color\":\"#00a6a6\",");
   json += F("\"icons\":[{\"src\":\"/icon.svg\",\"sizes\":\"any\",\"type\":\"image/svg+xml\",\"purpose\":\"any maskable\"}],");
   json += F("\"shortcuts\":[{\"name\":\"Dashboard\",\"url\":\"/\",\"description\":\"Open local dashboard\"}]}");
   return json;
@@ -2612,33 +2612,45 @@ void handleCaptivePortalProbe() {
 
 String setupPage(const String& message) {
   String page;
-  page.reserve(30000);
+  page.reserve(34000);
   page += F("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
   page += F("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
-  page += F("<meta name=\"theme-color\" content=\"#008b8b\">");
+  page += F("<meta name=\"theme-color\" content=\"#0b0f14\">");
   page += F("<meta name=\"apple-mobile-web-app-capable\" content=\"yes\">");
   page += F("<meta name=\"apple-mobile-web-app-title\" content=\"Tuya Bridge\">");
   page += F("<link rel=\"manifest\" href=\"/manifest.webmanifest\">");
   page += F("<link rel=\"icon\" href=\"/icon.svg\" type=\"image/svg+xml\">");
   page += F("<title>Tuya HomeKit Bridge</title><style>");
-  page += F(":root{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#14212b;background:#f6f8fa;line-height:1.45}");
-  page += F("body{margin:0;padding:18px}.wrap{max-width:980px;margin:0 auto}.panel{background:white;border:1px solid #d8dee4;border-radius:8px;padding:20px;margin:0 0 16px}");
-  page += F("h1{margin:0 0 6px;font-size:28px}h2{font-size:18px;margin:0 0 12px}h3{font-size:16px;margin:0 0 10px}.hint,.help,.muted{color:#57606a;margin-top:0}.help{font-size:13px;line-height:1.35}");
-  page += F(".steps{display:flex;gap:8px;overflow:auto;margin:16px 0}.step-dot{border:1px solid #d0d7de;background:#fff;color:#24292f;border-radius:999px;padding:8px 10px;white-space:nowrap;font-size:13px}.step-dot.active{background:#008b8b;color:white;border-color:#008b8b}");
-  page += F(".step{display:none}.step.active{display:block}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}label{display:grid;gap:6px;font-weight:600}");
-  page += F("input,select{font:inherit;padding:10px;border:1px solid #d0d7de;border-radius:6px;background:white;min-width:0}button{font:inherit;border:0;border-radius:6px;padding:10px 14px;background:#008b8b;color:white;font-weight:700;cursor:pointer}");
-  page += F("button.secondary{background:#24292f}button.danger{background:#b42318}button.small{padding:6px 9px;font-size:13px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}");
-  page += F(".msg{margin:16px 0;padding:12px;border-radius:6px;background:#ddf4ff;border:1px solid #54aeef}.error{background:#ffebe9;border-color:#ff8182}.result-card{margin-top:14px;padding:12px;border:1px solid #d8dee4;border-radius:6px;background:#f6f8fa}");
-  page += F(".badge{display:inline-block;border-radius:999px;padding:4px 10px;font-weight:700}.Healthy{background:#dafbe1;color:#116329}.Warning{background:#fff8c5;color:#7d4e00}.Error{background:#ffebe9;color:#b42318}.simple .advanced-only{display:none}");
-  page += F("table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;border-bottom:1px solid #d8dee4;padding:8px;vertical-align:top}th{width:34%;color:#57606a;font-weight:600}code{word-break:break-all}.log{max-height:220px;overflow:auto;background:#0d1117;color:#c9d1d9;border-radius:6px;padding:10px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}");
-  page += F("@media(max-width:640px){body{padding:10px}.panel{padding:14px}h1{font-size:23px}th,td{display:block;width:auto}.steps{padding-bottom:4px}}");
-  page += F("</style></head><body><main class=\"wrap\"><section class=\"panel\"><h1>");
+  page += F(":root{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#eef4f8;background:#0b0f14;line-height:1.45;color-scheme:dark}");
+  page += F("*{box-sizing:border-box}body{margin:0;padding:18px;background:#0b0f14}a{color:#70e2d6;text-decoration:none}a:hover{text-decoration:underline}.wrap{max-width:1080px;margin:0 auto}");
+  page += F(".panel,.result-card,.metric-card{background:#121820;border:1px solid #26313d;border-radius:8px;padding:18px;margin:0 0 14px;box-shadow:0 10px 30px rgba(0,0,0,.25)}");
+  page += F(".hero{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.title{min-width:0}.eyebrow{margin:0 0 8px;color:#84d9ce;font-size:12px;font-weight:800;text-transform:uppercase}.hint,.help,.muted{color:#9aa8b5;margin-top:0}.help{font-size:13px;line-height:1.4}");
+  page += F("h1{margin:0 0 8px;font-size:30px;line-height:1.12}h2{font-size:17px;margin:0 0 12px;color:#f7fbfd}h3{font-size:15px;margin:0 0 10px;color:#f7fbfd}");
+  page += F(".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}.metric-card{margin:0;padding:16px}.steps{display:flex;gap:8px;overflow:auto;margin:16px 0;padding-bottom:4px}");
+  page += F(".step-dot{border:1px solid #31404d;background:#0f151c;color:#b9c6d1;border-radius:999px;padding:8px 11px;white-space:nowrap;font-size:13px}.step-dot.active{background:#00a6a6;color:#071012;border-color:#00c7b7}");
+  page += F(".step{display:none}.step.active{display:block}label{display:grid;gap:6px;font-weight:700;color:#edf5f8}.actions label{display:inline-flex;align-items:center;gap:8px;font-weight:700;color:#cbd6de}");
+  page += F("input:not([type=radio]):not([type=checkbox]):not([type=file]),select,textarea{font:inherit;color:#eef4f8;padding:11px;border:1px solid #31404d;border-radius:7px;background:#0d131a;min-width:0;outline:none}input:focus,select:focus,textarea:focus{border-color:#00b8aa;box-shadow:0 0 0 3px rgba(0,184,170,.18)}input[type=radio],input[type=checkbox]{accent-color:#00a6a6}");
+  page += F("button{font:inherit;border:0;border-radius:7px;padding:10px 14px;background:#00a6a6;color:#061011;font-weight:800;cursor:pointer}button.secondary{background:#22303b;color:#eef4f8;border:1px solid #354756}button.danger{background:#c74238;color:white}button.small{padding:6px 9px;font-size:13px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}");
+  page += F(".msg{margin:16px 0;padding:12px;border-radius:7px;background:#13283a;border:1px solid #2f79a8}.error{background:#33191b;border-color:#c74238;color:#ffd7d4}.result-card{margin-top:14px;background:#10161d}.badge{display:inline-block;border-radius:999px;padding:5px 11px;font-weight:800}");
+  page += F(".Healthy{background:#123524;color:#7ff0a4}.Warning{background:#3a2e11;color:#ffd36a}.Error{background:#421d1f;color:#ffaaa4}.simple .advanced-only{display:none}");
+  page += F("table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;border-bottom:1px solid #273541;padding:8px;vertical-align:top}th{width:36%;color:#8d9dab;font-weight:700}td{color:#eef4f8}code{word-break:break-all}.log{max-height:220px;overflow:auto;background:#070b10;color:#c9d7df;border:1px solid #26313d;border-radius:7px;padding:10px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}");
+  page += F(".url-card{background:#0d1519;border-color:#24554f}.url-box{display:block;margin:8px 0;padding:11px 12px;border-radius:7px;background:#071011;border:1px solid #22635c;word-break:break-all;font-weight:800}.phone-note{border-left:3px solid #ffbf47;padding-left:10px}");
+  page += F("@media(max-width:640px){body{padding:10px}.panel,.result-card,.metric-card{padding:14px}h1{font-size:24px}.hero{display:block}th,td{display:block;width:auto}.steps{margin-left:-2px;margin-right:-2px}.actions{gap:8px}button{width:100%;justify-content:center}.actions label{width:auto}button.small{width:auto}}");
+  page += F("</style></head><body><main class=\"wrap\"><section class=\"panel\"><div class=\"hero\"><div class=\"title\"><p class=\"eyebrow\">ESP32 local control</p><h1>");
   page += homekit_started ? F("Tuya HomeKit Dashboard") : F("Tuya HomeKit Setup");
   page += F("</h1><p class=\"hint\">");
   page += homekit_started
               ? F("Local admin dashboard for configuration, diagnostics and reset actions. This page has no login; use it only on a trusted LAN.")
               : F("Step-by-step setup for Wi-Fi, Tuya LAN credentials and HomeKit. Secrets are stored only in ESP32 flash memory.");
-  page += F("</p>");
+  page += F("</p></div>");
+  if (homekit_started) {
+    page += F("<span class=\"badge ");
+    page += htmlEscape(currentHealthStatus().state);
+    page += F("\">");
+    page += htmlEscape(currentHealthStatus().state);
+    page += F("</span>");
+  }
+  page += F("</div>");
   if (!message.isEmpty()) {
     page += F("<div class=\"msg\">");
     page += htmlEscape(message);
@@ -2655,21 +2667,21 @@ String setupPage(const String& message) {
     addMetricRow(page, "Last update", health.updated_at);
     addMetricRow(page, "Suggested fix", health.suggested_fix);
     page += F("</table></div>");
-    page += F("<div class=\"grid\"><div><h2>Device / HomeKit</h2><table>");
+    page += F("<div class=\"grid\"><div class=\"metric-card\"><h2>Device / HomeKit</h2><table>");
     addMetricRow(page, "Accessory name", config.homekit_accessory_name);
     addMetricRow(page, "HomeKit type", homeKitServiceLabel());
     addMetricRow(page, "Current relay state",
                  runtime_status.relay_state_known ? onOff(runtime_status.relay_state)
                                                   : "unknown");
     addMetricRow(page, "Polling interval", String(config.poll_interval_seconds) + " seconds");
-    page += F("</table></div><div><h2>Tuya</h2><table>");
+    page += F("</table></div><div class=\"metric-card\"><h2>Tuya</h2><table>");
     addMetricRow(page, "Tuya IP", config.tuya_ip);
     addMetricRow(page, "Protocol version", config.tuya_protocol_version);
     addMetricRow(page, "Relay DPS", config.tuya_relay_dps);
     addMetricRow(page, "Last status", runtime_status.last_tuya_status);
     addMetricRow(page, "Last latency", String(runtime_status.last_latency_ms) + " ms");
     addMetricRow(page, "Failed poll count", String(runtime_status.failed_poll_count));
-    page += F("</table></div><div><h2>Network</h2><table>");
+    page += F("</table></div><div class=\"metric-card\"><h2>Network</h2><table>");
     addMetricRow(page, "Wi-Fi SSID", WiFi.SSID());
     addMetricRow(page, "ESP32 IP address", WiFi.localIP().toString());
     addMetricRow(page, "Local hostname", config.device_hostname + ".local");
@@ -2695,18 +2707,18 @@ String setupPage(const String& message) {
       }
     }
     page += F("</div>");
-    page += F("<div class=\"result-card\"><h3>Management URL</h3><p class=\"help\">Use this bookmark after setup instead of searching for the ESP32 IP address.</p><p><a href=\"");
+    page += F("<div class=\"result-card url-card\"><h3>Management URL</h3><p class=\"help\">Use the IP URL on phones when .local does not resolve. The ESP32 is working if the IP URL opens.</p><a class=\"url-box\" href=\"");
     page += htmlEscape(localDashboardUrl());
     page += F("\">");
     page += htmlEscape(localDashboardUrl());
-    page += F("</a></p>");
+    page += F("</a>");
     const String ip_url = ipDashboardUrl();
     if (!ip_url.isEmpty()) {
-      page += F("<p class=\"help\">Fallback IP URL: <a href=\"");
+      page += F("<a class=\"url-box\" href=\"");
       page += htmlEscape(ip_url);
       page += F("\">");
       page += htmlEscape(ip_url);
-      page += F("</a></p>");
+      page += F("</a><p class=\"help phone-note\">On iPhone, prefer this fallback IP URL if Safari says the .local server stopped responding.</p>");
     }
     page += F("</div>");
   }
